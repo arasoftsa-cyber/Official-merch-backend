@@ -9,8 +9,15 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
+Write-Host "Seeding UI smoke data..."
+node -r dotenv/config scripts/seed_ui_smoke.js
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "UI smoke seed failed."
+  exit 1
+}
+
 Write-Host "Running backend smoke tests..."
-node tests/smoke_phase1_3.js
+cmd /c "set CI_SMOKE=1&& set SMOKE_SEED_ENABLED=1&& node -r dotenv/config tests/smoke_phase1_3.js"
 if ($LASTEXITCODE -ne 0) {
   Write-Error "Backend smoke tests failed."
   exit 1

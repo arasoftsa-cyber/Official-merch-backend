@@ -18,6 +18,13 @@ const DROP_REQUIRES_PRODUCTS = { error: "drop_requires_products" };
 
 const isArtistDropsScope = (req) => req.baseUrl?.includes("/artist/drops");
 const isAdminDropsScope = (req) => req.baseUrl?.includes("/admin/drops");
+const getArtistIdsForUser = async (db, userId) => {
+  if (!db || !userId) return [];
+  const rows = await db("artist_user_map").select("artist_id").where({ user_id: userId });
+  return rows
+    .map((row) => row?.artist_id)
+    .filter((value) => typeof value === "string" && value.length > 0);
+};
 const setDropIdAliasDeprecationHeaders = (_req, res, next) => {
   res.setHeader("Deprecation", "true");
   res.setHeader("Sunset", "2026-04-15T00:00:00Z");
@@ -70,16 +77,8 @@ router.get("/", async (req, res, next) => {
       if (!req.user?.id) {
         return res.status(401).json({ error: "unauthorized" });
       }
-      if (req.user.role !== "artist") {
-        return res.status(403).json({ error: "forbidden" });
-      }
       const db = getDb();
-      const mappings = await db("artist_user_map")
-        .select("artist_id")
-        .where({ user_id: req.user.id });
-      const artistIds = mappings
-        .map((row) => row?.artist_id)
-        .filter((value) => typeof value === "string" && value.length > 0);
+      const artistIds = await getArtistIdsForUser(db, req.user.id);
       if (artistIds.length === 0) {
         return res.json({ items: [] });
       }
@@ -88,25 +87,42 @@ router.get("/", async (req, res, next) => {
         req.query?.includeArchived === "1" || req.query?.includeArchived === "true";
 
       const query = db("drops")
+        .leftJoin("drop_products as dp", "dp.drop_id", "drops.id")
         .select(
-          "id",
-          "handle",
-          "title",
-          "description",
-          "hero_image_url",
-          "starts_at",
-          "ends_at",
-          "artist_id",
-          "label_id",
-          "status",
-          "created_by_user_id",
-          "created_at",
-          "updated_at"
+          "drops.id",
+          "drops.handle",
+          "drops.title",
+          "drops.description",
+          "drops.hero_image_url",
+          "drops.starts_at",
+          "drops.ends_at",
+          "drops.artist_id",
+          "drops.label_id",
+          "drops.status",
+          "drops.created_by_user_id",
+          "drops.created_at",
+          "drops.updated_at",
+          db.raw("count(distinct dp.product_id)::int as product_count")
         )
-        .whereIn("artist_id", artistIds);
+        .whereIn("drops.artist_id", artistIds)
+        .groupBy(
+          "drops.id",
+          "drops.handle",
+          "drops.title",
+          "drops.description",
+          "drops.hero_image_url",
+          "drops.starts_at",
+          "drops.ends_at",
+          "drops.artist_id",
+          "drops.label_id",
+          "drops.status",
+          "drops.created_by_user_id",
+          "drops.created_at",
+          "drops.updated_at"
+        );
 
       if (!includeArchived) {
-        query.whereNot("status", "archived");
+        query.whereNot("drops.status", "archived");
       }
 
       const rows = await query.orderBy("created_at", "desc").limit(100);
@@ -123,6 +139,8 @@ router.get("/", async (req, res, next) => {
           created_at: row.created_at,
           updated_at: row.updated_at,
           artist_id: row.artist_id,
+          product_count: Number(row.product_count ?? 0),
+          productCount: Number(row.product_count ?? 0),
         })),
       });
     }
@@ -570,6 +588,9 @@ router.post(
   requirePolicy("drop:create", "self", createDropCtx),
   async (req, res, next) => {
     try {
+      if (isArtistDropsScope(req)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
       const isAdminScope = isAdminDropsScope(req);
       const {
         handle,
@@ -744,6 +765,9 @@ router.post(
   requirePolicy("drop:add-product", "self", manageDropCtx),
   async (req, res, next) => {
     try {
+      if (isArtistDropsScope(req)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
       const productId = req.body?.productId;
       const sortOrder =
         typeof req.body?.sortOrder === "number" ? req.body.sortOrder : 0;
@@ -757,29 +781,31 @@ router.post(
         return res.status(404).json(PRODUCT_NOT_FOUND);
       }
 
-      if (req.drop.artist_id) {
-        if (product.artist_id !== req.drop.artist_id) {
+      if (req.user?.role !== "admin") {
+        if (req.drop.artist_id) {
+          if (product.artist_id !== req.drop.artist_id) {
+            return res.status(403).json({ error: "forbidden" });
+          }
+          const owns = await isUserLinkedToArtist(
+            db,
+            req.user.id,
+            req.drop.artist_id
+          );
+          if (!owns) {
+            return res.status(403).json({ error: "forbidden" });
+          }
+        } else if (req.drop.label_id) {
+          const owns = await isLabelLinkedToArtist(
+            db,
+            req.drop.label_id,
+            product.artist_id
+          );
+          if (!owns) {
+            return res.status(403).json({ error: "forbidden" });
+          }
+        } else {
           return res.status(403).json({ error: "forbidden" });
         }
-        const owns = await isUserLinkedToArtist(
-          db,
-          req.user.id,
-          req.drop.artist_id
-        );
-        if (!owns) {
-          return res.status(403).json({ error: "forbidden" });
-        }
-      } else if (req.drop.label_id) {
-        const owns = await isLabelLinkedToArtist(
-          db,
-          req.drop.label_id,
-          product.artist_id
-        );
-        if (!owns) {
-          return res.status(403).json({ error: "forbidden" });
-        }
-      } else {
-        return res.status(403).json({ error: "forbidden" });
       }
 
       await db("drop_products")
@@ -808,6 +834,13 @@ router.post(
   async (req, res, next) => {
     try {
       if (isArtistDropsScope(req)) {
+        const db = getDb();
+        const owns = req.drop.artist_id
+          ? await isUserLinkedToArtist(db, req.user.id, req.drop.artist_id)
+          : false;
+        if (!owns) {
+          return res.status(403).json({ error: "forbidden" });
+        }
         if (req.drop.status === "archived") {
           return res.status(400).json({ error: "invalid_status_transition" });
         }
@@ -849,6 +882,13 @@ router.post(
   async (req, res, next) => {
     try {
       if (isArtistDropsScope(req)) {
+        const db = getDb();
+        const owns = req.drop.artist_id
+          ? await isUserLinkedToArtist(db, req.user.id, req.drop.artist_id)
+          : false;
+        if (!owns) {
+          return res.status(403).json({ error: "forbidden" });
+        }
         if (req.drop.status === "archived") {
           return res.status(400).json({ error: "invalid_status_transition" });
         }

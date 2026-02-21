@@ -65,33 +65,56 @@ const handleLinkArtistUser = async (req, res, next) => {
     if (!ensureAdmin(req, res)) return;
     const db = getDb();
     const { artistId } = req.params;
-    const { userId } = req.body || {};
-    if (!artistId || !userId) {
+    const rawUserId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
+    const rawEmail =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : typeof req.body?.userEmail === "string"
+        ? req.body.userEmail.trim().toLowerCase()
+        : "";
+
+    if (!artistId || (!rawUserId && !rawEmail)) {
       return res.status(400).json({ error: "invalid_request" });
     }
     const [artist] = await db("artists").where({ id: artistId }).select("id");
     if (!artist) {
       return res.status(404).json({ error: "artist_not_found" });
     }
-    const [user] = await db("users").where({ id: userId }).select("id", "role");
+
+    let user = null;
+    if (rawUserId) {
+      [user] = await db("users").where({ id: rawUserId }).select("id", "role");
+    }
+    if (!user && rawEmail) {
+      [user] = await db("users")
+        .whereRaw("lower(email) = ?", [rawEmail])
+        .select("id", "role");
+    }
+    if (!user && !rawEmail && rawUserId.includes("@")) {
+      [user] = await db("users")
+        .whereRaw("lower(email) = ?", [rawUserId.toLowerCase()])
+        .select("id", "role");
+    }
+
     if (!user) {
       return res.status(404).json({ error: "user_not_found" });
     }
     if (user.role !== "artist") {
       return res.status(400).json({ error: "user_not_artist" });
     }
-    const existing = await db("artist_user_map").where({ user_id: userId }).first();
+    const existing = await db("artist_user_map").where({ user_id: user.id }).first();
     if (existing) {
       await db("artist_user_map")
-        .where({ user_id: userId })
+        .where({ user_id: user.id })
         .update({ artist_id: artistId });
     } else {
       await db("artist_user_map").insert({
-        user_id: userId,
+        id: randomUUID(),
+        user_id: user.id,
         artist_id: artistId,
       });
     }
-    res.json({ ok: true, userId, artistId });
+    res.json({ ok: true, userId: user.id, artistId });
   } catch (err) {
     next(err);
   }
@@ -597,9 +620,23 @@ router.post("/orders/:id/refund", requireAuth, async (req, res, next) => {
       if (!payment || payment.status !== "paid") {
         return res.status(400).json(ORDER_NOT_REFUNDABLE);
       }
-      await db("payments").where({ id: payment.id }).update({
-        status: "refunded",
-        updated_at: db.fn.now(),
+      await db.transaction(async (trx) => {
+        const now = trx.fn.now();
+        await trx("payments").where({ id: payment.id }).update({
+          status: "refunded",
+          updated_at: now,
+        });
+        const existingRefundedEvent = await trx("order_events")
+          .where({ order_id: orderId, type: "refunded" })
+          .first("id");
+        if (!existingRefundedEvent) {
+          await trx("order_events").insert({
+            order_id: orderId,
+            type: "refunded",
+            actor_user_id: req.user.id,
+            created_at: now,
+          });
+        }
       });
       return res.json({ ok: true, status: "refunded" });
     } catch (err) {
@@ -714,5 +751,165 @@ router.post(
   express.json(),
   handleLinkArtistUser
 );
+
+const toIsoOrNull = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+};
+
+const normalizeRequestStatus = (status) => {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "denied") return "rejected";
+  return normalized || "pending";
+};
+
+const buildArtistStatus = (requestStatus, linkedUsersCount) => {
+  const normalized = normalizeRequestStatus(requestStatus);
+  if (normalized === "approved") return "approved";
+  if (normalized === "rejected" || normalized === "denied") return "rejected";
+  if (linkedUsersCount > 0) return "active";
+  return "onboarded";
+};
+
+router.get("/artists", requireAuth, async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) return;
+    const db = getDb();
+    const rows = await db("artists")
+      .select("id", "name", "handle", "created_at")
+      .orderBy("created_at", "desc")
+      .limit(200);
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      name: r.name ?? r.artist_name ?? "",
+      handle: r.handle ?? "",
+      status: r.status ?? "active",
+      email: r.email ?? "",
+      createdAt: r.created_at ?? null,
+    }));
+
+    console.log("[admin artists] ok count=", items.length);
+    return res.json({ items, total: rows.length });
+  } catch (err) {
+    console.error("[admin artists] error", err);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+});
+
+router.get("/artists/:id", requireAuth, async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) return;
+    const artistId = String(req.params.id || "").trim();
+    if (!artistId) {
+      return res.status(400).json({ error: "validation_error", message: "artist id is required" });
+    }
+
+    const db = getDb();
+    const hasArtistsTable = await db.schema.hasTable("artists");
+    if (!hasArtistsTable) {
+      return res.status(404).json({ error: "not_found", message: "Artist not found" });
+    }
+
+    const artistColumns = await db("artists").columnInfo();
+    const artist = await db("artists").where({ id: artistId }).first();
+    if (!artist) {
+      return res.status(404).json({ error: "not_found", message: "Artist not found" });
+    }
+
+    let email = "";
+    const hasArtistUserMap = await db.schema.hasTable("artist_user_map");
+    const hasUsersTable = await db.schema.hasTable("users");
+    if (hasArtistUserMap && hasUsersTable) {
+      const linkedUser = await db("artist_user_map as aum")
+        .leftJoin("users as u", "u.id", "aum.user_id")
+        .where("aum.artist_id", artistId)
+        .select("u.email")
+        .first();
+      email = String(linkedUser?.email ?? "").trim();
+    }
+
+    let latestApprovedRequest = null;
+    const hasRequestsTable = await db.schema.hasTable("artist_access_requests");
+    if (hasRequestsTable) {
+      const requestColumns = await db("artist_access_requests").columnInfo();
+      const requestQuery = db("artist_access_requests").where("status", "approved");
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "handle") && artist.handle) {
+        requestQuery.whereRaw("lower(trim(handle)) = lower(trim(?))", [artist.handle]);
+      } else if (
+        Object.prototype.hasOwnProperty.call(requestColumns, "email") &&
+        email
+      ) {
+        requestQuery.whereRaw("lower(trim(email)) = lower(trim(?))", [email]);
+      }
+      latestApprovedRequest = await requestQuery.orderBy("created_at", "desc").first();
+    }
+
+    let profilePhotoUrl = "";
+    const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
+    const hasMediaAssets = await db.schema.hasTable("media_assets");
+    if (hasEntityMediaLinks && hasMediaAssets) {
+      const mediaRow = await db("entity_media_links as eml")
+        .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
+        .where("eml.entity_type", "artist")
+        .andWhere("eml.role", "profile_photo")
+        .andWhere("eml.entity_id", artistId)
+        .orderBy("eml.sort_order", "asc")
+        .select("ma.public_url")
+        .first();
+      profilePhotoUrl = String(mediaRow?.public_url ?? "").trim();
+    }
+
+    const status =
+      String(
+        artist.status ??
+          latestApprovedRequest?.status ??
+          "active"
+      )
+        .trim()
+        .toLowerCase() || "active";
+
+    const phone = Object.prototype.hasOwnProperty.call(artistColumns, "phone")
+      ? String(artist.phone ?? "").trim()
+      : String(
+          latestApprovedRequest?.phone ??
+            latestApprovedRequest?.contact_phone ??
+            ""
+        ).trim();
+
+    const aboutMe = Object.prototype.hasOwnProperty.call(artistColumns, "about_me")
+      ? String(artist.about_me ?? "").trim()
+      : String(latestApprovedRequest?.about_me ?? latestApprovedRequest?.pitch ?? "").trim();
+
+    const messageForFans = Object.prototype.hasOwnProperty.call(
+      artistColumns,
+      "message_for_fans"
+    )
+      ? String(artist.message_for_fans ?? "").trim()
+      : String(latestApprovedRequest?.message_for_fans ?? "").trim();
+
+    const socials = Object.prototype.hasOwnProperty.call(artistColumns, "socials")
+      ? artist.socials ?? []
+      : latestApprovedRequest?.socials ?? [];
+
+    return res.status(200).json({
+      id: artist.id,
+      name: artist.name ?? artist.artist_name ?? "",
+      handle: String(artist.handle ?? "").replace(/^@/, ""),
+      status,
+      email,
+      phone,
+      aboutMe,
+      messageForFans,
+      socials: Array.isArray(socials) ? socials : [],
+      profilePhotoUrl,
+    });
+  } catch (err) {
+    console.error("[admin artist detail] error", err);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+});
 
 module.exports = router;

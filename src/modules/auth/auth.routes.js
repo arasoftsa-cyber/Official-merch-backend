@@ -4,7 +4,7 @@ const router = express.Router();
 const rateLimit = require("../../middleware/rateLimit");
 const { requireAuth } = require("../../middleware/auth.middleware");
 const { requirePolicy } = require("../../middleware/policy.middleware");
-const { ping, login, register } = require("./auth.controller");
+const { ping, login, partnerLogin, register } = require("./auth.controller");
 
 const loginRateLimiter = rateLimit({
   windowMs: 60_000,
@@ -19,6 +19,12 @@ router.post(
   express.json(),
   ...(isProd ? [loginRateLimiter] : []),
   login
+);
+router.post(
+  "/partner/login",
+  express.json(),
+  ...(isProd ? [loginRateLimiter] : []),
+  partnerLogin
 );
 router.post("/register", express.json(), register);
 router.get(

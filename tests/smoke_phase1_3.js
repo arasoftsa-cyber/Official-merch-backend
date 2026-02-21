@@ -1,8 +1,32 @@
+require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { getDb } = require("../src/config/db");
 
 const BASE_URL = process.env.API_BASE || "http://localhost:3000";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ARTIST_EMAIL = process.env.ARTIST_EMAIL;
+const ARTIST_PASSWORD = process.env.ARTIST_PASSWORD;
+const LABEL_EMAIL = process.env.LABEL_EMAIL;
+const LABEL_PASSWORD = process.env.LABEL_PASSWORD;
+const BUYER_EMAIL = process.env.BUYER_EMAIL;
+const BUYER_PASSWORD = process.env.BUYER_PASSWORD;
+const REQUIRED_CREDENTIAL_VARS = [
+  "ADMIN_EMAIL",
+  "ADMIN_PASSWORD",
+  "ARTIST_EMAIL",
+  "ARTIST_PASSWORD",
+  "LABEL_EMAIL",
+  "LABEL_PASSWORD",
+  "BUYER_EMAIL",
+  "BUYER_PASSWORD",
+];
+for (const key of REQUIRED_CREDENTIAL_VARS) {
+  if (!String(process.env[key] || "").trim()) {
+    throw new Error(`Missing required env var: ${key}`);
+  }
+}
 const REPORT_DIR = path.join(__dirname, "reports");
 const REPORT_PATH = path.join(REPORT_DIR, "smoke_phase1_3.md");
 
@@ -11,7 +35,7 @@ const uniqueSuffix = () => {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 };
 
-const LABEL_USER_ID = "00000000-0000-0000-0000-000000000004";
+const SEEDED_DROP_HANDLE = "seed-drop";
 
 const req = async (method, path, { token, json, headers: extraHeaders } = {}) => {
   const headers = {
@@ -198,6 +222,8 @@ const ensurePaymentState = (res, expected) => {
   let paymentAttemptId;
   let unpaidOrderId;
   let dropHandle;
+  let foreignDropHandle;
+  let seededArtistDropKey;
   let dropPublished = false;
   let requestorEmail;
   let requestorPassword;
@@ -222,7 +248,7 @@ const ensurePaymentState = (res, expected) => {
   stepResults.push(
     await runStep("Admin login", async () => {
       const res = await req("POST", "/api/auth/login", {
-        json: { email: "admin@test.com", password: "admin123" },
+        json: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
       });
       if (res.status !== 200) {
         throwRes(res);
@@ -235,6 +261,18 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       adminToken = res.json.accessToken;
+      return { status: res.status };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Admin partner login", async () => {
+      const res = await req("POST", "/api/auth/partner/login", {
+        json: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+      });
+      if (res.status !== 200 || !res.json?.accessToken) {
+        throwRes(res, "admin partner login");
+      }
       return { status: res.status };
     })
   );
@@ -270,7 +308,7 @@ const ensurePaymentState = (res, expected) => {
   stepResults.push(
     await runStep("Buyer login", async () => {
       const res = await req("POST", "/api/auth/login", {
-        json: { email: "buyer@test.com", password: "buyer123" },
+        json: { email: BUYER_EMAIL, password: BUYER_PASSWORD },
       });
       if (res.status !== 200) {
         throwRes(res);
@@ -283,6 +321,18 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       buyerToken = res.json.accessToken;
+      return { status: res.status };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Buyer partner login rejected", async () => {
+      const res = await req("POST", "/api/auth/partner/login", {
+        json: { email: BUYER_EMAIL, password: BUYER_PASSWORD },
+      });
+      if (res.status !== 401 || res.json?.error !== "fan_account") {
+        throwRes(res, "buyer partner login must be fan_account");
+      }
       return { status: res.status };
     })
   );
@@ -317,19 +367,21 @@ const ensurePaymentState = (res, expected) => {
     await runStep("Requestor submits artist request", async () => {
       const suffix = uniqueSuffix();
       const handle = `smoke-artist-${suffix}`;
+      const phone = `9999999999-${suffix}`;
       const res = await req("POST", "/api/artist-access-requests", {
         token: requestorToken,
         json: {
           artistName: `Smoke Artist ${suffix}`,
           handle,
           contactEmail: requestorEmail,
+          phone,
           pitch: "Smoke test request",
         },
       });
-      if (![200, 201].includes(res.status)) {
+      if (res.status !== 201) {
         throwRes(res);
       }
-      const id = res.json?.id || res.json?.requestId;
+      const id = res.json?.id;
       if (!id) {
         throw {
           status: res.status,
@@ -397,7 +449,7 @@ const ensurePaymentState = (res, expected) => {
   stepResults.push(
     await runStep("Label login", async () => {
       const res = await req("POST", "/api/auth/login", {
-        json: { email: "label@test.com", password: "label123" },
+        json: { email: LABEL_EMAIL, password: LABEL_PASSWORD },
       });
       if (res.status !== 200) {
         throwRes(res);
@@ -410,6 +462,18 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       labelToken = res.json.accessToken;
+      return { status: res.status };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Label partner login", async () => {
+      const res = await req("POST", "/api/auth/partner/login", {
+        json: { email: LABEL_EMAIL, password: LABEL_PASSWORD },
+      });
+      if (res.status !== 200 || !res.json?.accessToken) {
+        throwRes(res, "label partner login");
+      }
       return { status: res.status };
     })
   );
@@ -544,12 +608,6 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       labelId = row.id;
-      const linkRes = await req("POST", "/api/dev/link-label-user", {
-        json: { userId: LABEL_USER_ID, labelId },
-      });
-      if (linkRes.status !== 200) {
-        throwRes(linkRes);
-      }
       if (res.status === 409) {
         return {
           status: res.status,
@@ -608,6 +666,7 @@ const ensurePaymentState = (res, expected) => {
         token: adminToken,
         json: {
           userId: "00000000-0000-0000-0000-000000000003",
+          email: ARTIST_EMAIL,
         },
       });
       if (res.status !== 200) {
@@ -645,7 +704,7 @@ const ensurePaymentState = (res, expected) => {
   stepResults.push(
     await runStep("Artist login", async () => {
       const res = await req("POST", "/api/auth/login", {
-        json: { email: "artist@test.com", password: "artist123" },
+        json: { email: ARTIST_EMAIL, password: ARTIST_PASSWORD },
       });
       if (res.status !== 200) {
         throwRes(res);
@@ -658,6 +717,18 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       artistToken = res.json.accessToken;
+      return { status: res.status };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Artist partner login", async () => {
+      const res = await req("POST", "/api/auth/partner/login", {
+        json: { email: ARTIST_EMAIL, password: ARTIST_PASSWORD },
+      });
+      if (res.status !== 200 || !res.json?.accessToken) {
+        throwRes(res, "artist partner login");
+      }
       return { status: res.status };
     })
   );
@@ -764,6 +835,118 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       return { status: writeRes.status, body: writeRes.bodyText };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Artist seeded drop has products in list", async () => {
+      const readArtistDrops = async () => {
+        const res = await req("GET", "/api/artist/drops", { token: artistToken });
+        if (res.status !== 200) {
+          throwRes(res);
+        }
+        const items = Array.isArray(res.json?.items)
+          ? res.json.items
+          : Array.isArray(res.json)
+          ? res.json
+          : [];
+        return { res, items };
+      };
+
+      let { res, items } = await readArtistDrops();
+      let seededDrop =
+        items.find((item) => item?.handle === SEEDED_DROP_HANDLE) ||
+        items.find((item) => Number(item?.product_count ?? item?.productCount ?? 0) > 0);
+
+      if (!seededDrop) {
+        if (!artistId || !productId) {
+          throw {
+            status: res.status,
+            body: res.bodyText,
+            message: "seeded artist drop not found and cannot create fallback",
+          };
+        }
+        const fallbackHandle = `${SEEDED_DROP_HANDLE}-${uniqueSuffix()}`;
+        const createDropRes = await req("POST", "/api/admin/drops", {
+          token: adminToken,
+          json: {
+            handle: fallbackHandle,
+            title: "Seeded Artist Publish Drop",
+            artistId,
+          },
+        });
+        if (![200, 201].includes(createDropRes.status)) {
+          throwRes(createDropRes);
+        }
+        const attachRes = await req("POST", `/api/admin/drops/${fallbackHandle}/products`, {
+          token: adminToken,
+          json: { productId },
+        });
+        if (attachRes.status !== 200) {
+          throwRes(attachRes);
+        }
+        ({ res, items } = await readArtistDrops());
+        seededDrop =
+          items.find((item) => item?.handle === fallbackHandle) ||
+          items.find((item) => Number(item?.product_count ?? item?.productCount ?? 0) > 0);
+      }
+
+      const productCount = Number(seededDrop?.product_count ?? seededDrop?.productCount ?? 0);
+      if (productCount < 1) {
+        throw {
+          status: res.status,
+          body: res.bodyText,
+          message: "seeded artist drop has no products",
+        };
+      }
+
+      seededArtistDropKey = seededDrop?.handle || seededDrop?.id;
+      if (!seededArtistDropKey) {
+        throw {
+          status: res.status,
+          body: res.bodyText,
+          message: "seeded artist drop key missing",
+        };
+      }
+      return { status: res.status, body: res.bodyText };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Artist publishes seeded drop successfully", async () => {
+      if (!seededArtistDropKey) {
+        throw {
+          status: 400,
+          body: "",
+          message: "missing seededArtistDropKey",
+        };
+      }
+
+      const unpublishRes = await req(
+        "POST",
+        `/api/artist/drops/${encodeURIComponent(seededArtistDropKey)}/unpublish`,
+        { token: artistToken }
+      );
+      if (unpublishRes.status !== 200) {
+        throwRes(unpublishRes);
+      }
+
+      const publishRes = await req(
+        "POST",
+        `/api/artist/drops/${encodeURIComponent(seededArtistDropKey)}/publish`,
+        { token: artistToken }
+      );
+      if (publishRes.status !== 200) {
+        throwRes(publishRes);
+      }
+      if (publishRes.json?.drop?.status !== "published") {
+        throw {
+          status: publishRes.status,
+          body: publishRes.bodyText,
+          message: "seeded drop not published",
+        };
+      }
+      return { status: publishRes.status, body: publishRes.bodyText };
     })
   );
 
@@ -1608,7 +1791,7 @@ const ensurePaymentState = (res, expected) => {
       );
 
       stepResults.push(
-        await runStep("Admin order events include fulfilled", async () => {
+        await runStep("Admin order events include paid/fulfilled/refunded", async () => {
           if (!paidOrderId) {
             throw {
               status: 400,
@@ -1620,11 +1803,12 @@ const ensurePaymentState = (res, expected) => {
           if (res.status !== 200) {
             throwRes(res);
           }
-          if (!Array.isArray(res.json?.items) || !res.json.items.some((event) => event.type === "fulfilled")) {
+          const types = new Set((res.json?.items || []).map((event) => event.type));
+          if (!types.has("paid") || !types.has("fulfilled") || !types.has("refunded")) {
             throw {
               status: res.status,
               body: res.bodyText,
-              message: "fulfilled event missing",
+              message: "admin lifecycle events missing",
             };
           }
           return { status: res.status, body: res.bodyText };
@@ -1728,13 +1912,20 @@ const ensurePaymentState = (res, expected) => {
       );
 
       stepResults.push(
-        await runStep("Buyer order events include fulfilled", async () => {
-          const res = await req("GET", `/api/orders/${orderId}/events`, { token: buyerToken });
+        await runStep("Buyer order events include paid/fulfilled/refunded", async () => {
+          if (!paidOrderId) {
+            throw {
+              status: 400,
+              body: "",
+              message: "missing paid order id",
+            };
+          }
+          const res = await req("GET", `/api/orders/${paidOrderId}/events`, { token: buyerToken });
           if (res.status !== 200) {
             throwRes(res);
           }
           const types = new Set((res.json?.items || []).map((event) => event.type));
-          if (!types.has("placed") || !types.has("fulfilled")) {
+          if (!types.has("placed") || !types.has("paid") || !types.has("fulfilled") || !types.has("refunded")) {
             throw {
               status: res.status,
               body: res.bodyText,
@@ -2037,7 +2228,14 @@ const ensurePaymentState = (res, expected) => {
 
       stepResults.push(
         await runStep("Buyer cannot cancel fulfilled order", async () => {
-          const res = await req("POST", `/api/orders/${orderId}/cancel`, {
+          if (!paidOrderId) {
+            throw {
+              status: 400,
+              body: "",
+              message: "missing paid order id",
+            };
+          }
+          const res = await req("POST", `/api/orders/${paidOrderId}/cancel`, {
             token: buyerToken,
           });
           if (res.status !== 400) {
@@ -2514,20 +2712,20 @@ const ensurePaymentState = (res, expected) => {
   );
 
   stepResults.push(
-    await runStep("Artist creates drop draft", async () => {
+    await runStep("Admin creates artist drop draft", async () => {
       if (!artistId) {
         throw {
           status: 400,
           message: "missing artistId",
           body: "",
           method: "POST",
-          url: "/api/drops",
+          url: "/api/admin/drops",
         };
       }
       const suffix = uniqueSuffix();
       dropHandle = `smoke-drop-${suffix}`;
-      const res = await req("POST", "/api/drops", {
-        token: artistToken,
+      const res = await req("POST", "/api/admin/drops", {
+        token: adminToken,
         json: {
           handle: dropHandle,
           title: "Smoke Drop",
@@ -2543,6 +2741,63 @@ const ensurePaymentState = (res, expected) => {
           body: res.bodyText,
           message: "drop handle missing",
         };
+      }
+      return { status: res.status, body: res.bodyText };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Artist scoped drops list includes own drop", async () => {
+      if (!dropHandle || !artistId) {
+        throw {
+          status: 400,
+          body: "",
+          message: "missing drop context",
+        };
+      }
+      const res = await req("GET", "/api/artist/drops", { token: artistToken });
+      if (res.status !== 200) {
+        throwRes(res);
+      }
+      const items = Array.isArray(res.json?.items)
+        ? res.json.items
+        : Array.isArray(res.json)
+        ? res.json
+        : [];
+      const match = items.find(
+        (item) => item?.handle === dropHandle || item?.id === dropHandle
+      );
+      if (!match) {
+        throw {
+          status: res.status,
+          body: res.bodyText,
+          message: "artist drops list missing own drop",
+        };
+      }
+      if ((match?.artistId && match.artistId !== artistId) || (match?.artist_id && match.artist_id !== artistId)) {
+        throw {
+          status: res.status,
+          body: res.bodyText,
+          message: "artist drops list returned mismatched artist",
+        };
+      }
+      return { status: res.status, body: res.bodyText };
+    })
+  );
+
+  stepResults.push(
+    await runStep("Artist cannot create drop via artist scope", async () => {
+      const suffix = uniqueSuffix();
+      const res = await req("POST", "/api/artist/drops", {
+        token: artistToken,
+        json: {
+          handle: `artist-forbidden-${suffix}`,
+          title: "Forbidden Artist Create",
+          artistId,
+        },
+      });
+      if (res.status !== 403) {
+        throwRes(res);
       }
       return { status: res.status, body: res.bodyText };
     })
@@ -2567,8 +2822,11 @@ const ensurePaymentState = (res, expected) => {
 
   const dropProductStep = async () => {
     if (!productId || !dropHandle) {
-      logSkip("Artist attaches product to drop", "missing productId or dropHandle");
-      logSkip("Artist publishes drop", "dependent on drop creation");
+      logSkip("Admin attaches product to drop", "missing productId or dropHandle");
+      logSkip("Artist cannot attach product in artist scope", "missing productId or dropHandle");
+      logSkip("Artist cannot publish foreign drop (403)", "dependent on foreign drop creation");
+      logSkip("Artist cannot unpublish foreign drop (403)", "dependent on foreign drop creation");
+      logSkip("Artist publishes own drop via artist scope", "dependent on drop creation");
       logSkip("Buyer views published drop", "dependent on publish");
       logSkip("Buyer views drop products", "dependent on publish");
       logSkip("Buyer sees featured drops", "dependent on publish");
@@ -2576,12 +2834,102 @@ const ensurePaymentState = (res, expected) => {
     }
 
     stepResults.push(
-      await runStep("Artist attaches product to drop", async () => {
-        const res = await req("POST", `/api/drops/${dropHandle}/products`, {
-          token: artistToken,
+      await runStep("Admin attaches product to drop", async () => {
+        const res = await req("POST", `/api/admin/drops/${dropHandle}/products`, {
+          token: adminToken,
           json: { productId },
         });
         if (res.status !== 200) {
+          throwRes(res);
+        }
+        return { status: res.status, body: res.bodyText };
+      })
+    );
+
+    stepResults.push(
+      await runStep("Artist cannot attach product in artist scope", async () => {
+        const res = await req("POST", `/api/artist/drops/${dropHandle}/products`, {
+          token: artistToken,
+          json: { productId },
+        });
+        if (res.status !== 403) {
+          throwRes(res);
+        }
+        return { status: res.status, body: res.bodyText };
+      })
+    );
+
+    stepResults.push(
+      await runStep("Admin creates foreign artist drop", async () => {
+        const suffix = uniqueSuffix();
+        const foreignArtistHandle = `foreign-artist-${suffix}`;
+        const createArtistRes = await req("POST", "/api/admin/provisioning/create-artist", {
+          token: adminToken,
+          json: {
+            handle: foreignArtistHandle,
+            name: `Foreign Artist ${suffix}`,
+            theme: {},
+          },
+        });
+        if (![200, 409].includes(createArtistRes.status)) {
+          throwRes(createArtistRes);
+        }
+        const foreignArtistId = createArtistRes.json?.artist?.id;
+        if (!foreignArtistId) {
+          throw {
+            status: createArtistRes.status,
+            body: createArtistRes.bodyText,
+            message: "missing foreign artist id",
+          };
+        }
+        foreignDropHandle = `foreign-drop-${suffix}`;
+        const createDropRes = await req("POST", "/api/admin/drops", {
+          token: adminToken,
+          json: {
+            handle: foreignDropHandle,
+            title: "Foreign Artist Drop",
+            artistId: foreignArtistId,
+          },
+        });
+        if (![200, 201].includes(createDropRes.status)) {
+          throwRes(createDropRes);
+        }
+        return { status: createDropRes.status, body: createDropRes.bodyText };
+      })
+    );
+
+    stepResults.push(
+      await runStep("Artist cannot publish foreign drop (403)", async () => {
+        if (!foreignDropHandle) {
+          throw {
+            status: 400,
+            body: "",
+            message: "missing foreignDropHandle",
+          };
+        }
+        const res = await req("POST", `/api/artist/drops/${foreignDropHandle}/publish`, {
+          token: artistToken,
+        });
+        if (res.status !== 403) {
+          throwRes(res);
+        }
+        return { status: res.status, body: res.bodyText };
+      })
+    );
+
+    stepResults.push(
+      await runStep("Artist cannot unpublish foreign drop (403)", async () => {
+        if (!foreignDropHandle) {
+          throw {
+            status: 400,
+            body: "",
+            message: "missing foreignDropHandle",
+          };
+        }
+        const res = await req("POST", `/api/artist/drops/${foreignDropHandle}/unpublish`, {
+          token: artistToken,
+        });
+        if (res.status !== 403) {
           throwRes(res);
         }
         return { status: res.status, body: res.bodyText };
@@ -2613,8 +2961,8 @@ const ensurePaymentState = (res, expected) => {
     );
 
     stepResults.push(
-      await runStep("Artist publishes drop", async () => {
-        const res = await req("POST", `/api/drops/${dropHandle}/publish`, {
+      await runStep("Artist publishes own drop via artist scope", async () => {
+        const res = await req("POST", `/api/artist/drops/${dropHandle}/publish`, {
           token: artistToken,
         });
         if (res.status !== 200) {
@@ -2688,8 +3036,8 @@ const ensurePaymentState = (res, expected) => {
 
     if (dropPublished) {
       stepResults.push(
-        await runStep("Artist unpublishes drop", async () => {
-          const res = await req("POST", `/api/drops/${dropHandle}/unpublish`, {
+        await runStep("Artist unpublishes own drop via artist scope", async () => {
+          const res = await req("POST", `/api/artist/drops/${dropHandle}/unpublish`, {
             token: artistToken,
           });
           if (res.status !== 200) {
@@ -2718,9 +3066,9 @@ const ensurePaymentState = (res, expected) => {
       );
 
       stepResults.push(
-        await runStep("Artist archives drop", async () => {
-          const res = await req("POST", `/api/drops/${dropHandle}/archive`, {
-            token: artistToken,
+        await runStep("Admin archives drop", async () => {
+          const res = await req("POST", `/api/admin/drops/${dropHandle}/archive`, {
+            token: adminToken,
           });
           if (res.status !== 200) {
             throwRes(res);
@@ -2770,9 +3118,9 @@ const ensurePaymentState = (res, expected) => {
         })
       );
     } else {
-      logSkip("Artist unpublishes drop", "drop not published");
+      logSkip("Artist unpublishes own drop via artist scope", "drop not published");
       logSkip("Buyer cannot see draft drop", "drop not published");
-      logSkip("Artist archives drop", "drop not published");
+      logSkip("Admin archives drop", "drop not published");
       logSkip("Buyer cannot see archived drop", "drop not published");
       logSkip("Buyer sees featured drops without archived", "drop not published");
     }

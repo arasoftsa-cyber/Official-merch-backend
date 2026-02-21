@@ -1,12 +1,12 @@
-const express = require("express");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../src/config/db");
+const { seedUiSmoke } = require("../scripts/seed_ui_smoke");
 
-const router = express.Router();
+const router = require("express").Router();
 
 const isDevMode = process.env.NODE_ENV !== "production";
 
-router.post("/dev/seed-artist-access-lead", async (req, res, next) => {
+router.post("/seed-artist-access-lead", async (req, res, next) => {
   if (!isDevMode) {
     return res.status(404).json({ ok: false, error: "not_found" });
   }
@@ -38,7 +38,7 @@ router.post("/dev/seed-artist-access-lead", async (req, res, next) => {
   }
 });
 
-router.post("/dev/seed-artist-access-request", async (req, res, next) => {
+router.post("/seed-artist-access-request", async (req, res, next) => {
   if (!isDevMode) {
     return res.status(404).json({ ok: false, error: "not_found" });
   }
@@ -84,40 +84,76 @@ router.post("/dev/seed-artist-access-request", async (req, res, next) => {
   }
 });
 
-router.post("/dev/link-label-user", async (req, res, next) => {
+router.post("/link-label-user", async (req, res, next) => {
+  console.log("[dev.link-label-user] HIT", { file: __filename, body: req.body });
   if (!isDevMode) {
     return res.status(404).json({ ok: false, error: "not_found" });
   }
 
-  const { userId, labelId } = req.body || {};
-  if (!userId || !labelId) {
-    return res.status(400).json({
-      ok: false,
-      error: "missing_parameters",
-      message: "userId and labelId are required",
-    });
-  }
-
   try {
+    const body = req.body || {};
+    const userId = typeof body.userId === "string" ? body.userId.trim() : "";
+    const emailRaw =
+      typeof body.email === "string"
+        ? body.email.trim().toLowerCase()
+        : typeof body.userEmail === "string"
+        ? body.userEmail.trim().toLowerCase()
+        : "";
+    const labelId = typeof body.labelId === "string" ? body.labelId.trim() : "";
+    const labelHandle =
+      typeof body.labelHandle === "string"
+        ? body.labelHandle.trim().toLowerCase()
+        : typeof body.handle === "string"
+        ? body.handle.trim().toLowerCase()
+        : "";
+
+    if ((!userId && !emailRaw) || (!labelId && !labelHandle)) {
+      return res.status(400).json({
+        error: "missing_parameters",
+        message: "userId/email and labelId/labelHandle are required",
+      });
+    }
+
     const db = getDb();
-    const rows = await db("label_users_map")
+    const resolvedUserId =
+      userId ||
+      (
+        await db("users")
+          .whereRaw("lower(email) = ?", [emailRaw])
+          .first("id")
+      )?.id;
+    if (!resolvedUserId) {
+      return res.status(400).json({ error: "user_not_found" });
+    }
+
+    const resolvedLabelId =
+      labelId ||
+      (
+        await db("labels")
+          .whereRaw("lower(handle) = ?", [labelHandle])
+          .first("id")
+      )?.id;
+    if (!resolvedLabelId) {
+      return res.status(400).json({ error: "label_not_found" });
+    }
+
+    // Repo schema has a unique constraint on user_id in label_users_map.
+    await db("label_users_map")
       .insert({
-        user_id: userId,
-        label_id: labelId,
+        user_id: resolvedUserId,
+        label_id: resolvedLabelId,
         created_at: db.fn.now(),
       })
       .onConflict("user_id")
-      .merge({ label_id: labelId })
-      .returning(["id", "user_id", "label_id", "created_at"]);
+      .merge({ label_id: resolvedLabelId });
 
-    const mapping = Array.isArray(rows) ? rows[0] : rows;
-    return res.json({ ok: true, mapping });
+    return res.json({ ok: true, userId: resolvedUserId, labelId: resolvedLabelId });
   } catch (err) {
-    next(err);
+    return res.status(500).json({ error: "dev_link_label_user_failed" });
   }
 });
 
-router.get("/dev/list-artist-access-leads", async (req, res, next) => {
+router.get("/list-artist-access-leads", async (req, res, next) => {
   if (!isDevMode) {
     return res.status(404).json({ ok: false, error: "not_found" });
   }
@@ -145,7 +181,7 @@ router.get("/dev/list-artist-access-leads", async (req, res, next) => {
   }
 });
 
-router.post("/dev/seed-ui-smoke-product", async (req, res, next) => {
+router.post("/seed-ui-smoke-product", async (req, res, next) => {
   if (!isDevMode) {
     return res.status(404).json({ ok: false, error: "not_found" });
   }
@@ -248,5 +284,16 @@ router.post("/dev/seed-ui-smoke-product", async (req, res, next) => {
     next(err);
   }
 });
+
+router.post('/seed-ui-smoke', async (req, res, next) => {
+  try {
+    await seedUiSmoke({ env: process.env });
+    return res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+console.log("[dev.routes] loaded from", __filename, "routes=", router.stack?.length);
 
 module.exports = router;

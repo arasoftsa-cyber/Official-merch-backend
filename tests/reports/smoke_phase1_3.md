@@ -1,18 +1,21 @@
 # Smoke Test Phase 1–3
-Generated: 2026-02-19T10:10:12.881Z
+Generated: 2026-02-21T10:35:32.778Z
 API Base: http://localhost:3000
 
 | Step | Result | Status | Notes |
 | --- | --- | --- | --- |
 | Admin login | PASS | 200 |  |
+| Admin partner login | PASS | 200 |  |
 | Admin leads baseline before artist request | PASS | 200 |  |
 | Admin probe allowed | PASS | 200 |  |
 | Buyer login | PASS | 200 |  |
+| Buyer partner login rejected | PASS | 401 |  |
 | Register smoke requester | PASS | 200 |  |
 | Requestor submits artist request | PASS | 201 |  |
-| Artist request does not create lead | PASS | 200 | lead count unchanged (41) |
+| Artist request does not create lead | PASS | 200 | lead count unchanged (10) |
 | Buyer probe forbidden (403) | PASS | 403 |  |
 | Label login | PASS | 200 |  |
+| Label partner login | PASS | 200 |  |
 | Dashboards meta | PASS | 200 |  |
 | Label read allowed | PASS | 200 |  |
 | Label mutate forbidden (403) | PASS | 403 |  |
@@ -26,9 +29,12 @@ API Base: http://localhost:3000
 | Link artist user to artist | PASS | 200 |  |
 | Buyer cannot create product | PASS | 403 |  |
 | Artist login | PASS | 200 |  |
+| Artist partner login | PASS | 200 |  |
 | Artist cannot create product | PASS | 403 |  |
 | Admin creates product | PASS | 201 |  |
 | Admin manages variants | PASS | 200 |  |
+| Artist seeded drop has products in list | PASS | 200 |  |
+| Artist publishes seeded drop successfully | PASS | 200 |  |
 | Artist cannot edit product fields | PASS | 403 |  |
 | Artist can toggle product status | PASS | 200 |  |
 | Artist cannot manage variants | PASS | 403 |  |
@@ -54,12 +60,12 @@ API Base: http://localhost:3000
 | Buyer order detail shows refunded payment | PASS | 200 |  |
 | Buyer creates unpaid order | PASS | 200 |  |
 | Admin cannot fulfill unpaid order | PASS | 400 |  |
-| Admin order events include fulfilled | PASS | 200 |  |
+| Admin order events include paid/fulfilled/refunded | PASS | 200 |  |
 | Admin dashboard summary | PASS | 200 |  |
 | Buyer cannot access admin dashboard summary | PASS | 403 |  |
 | Artist cannot access admin dashboard summary | PASS | 403 |  |
 | Label cannot access admin dashboard summary | PASS | 403 |  |
-| Buyer order events include fulfilled | PASS | 200 |  |
+| Buyer order events include paid/fulfilled/refunded | PASS | 200 |  |
 | Artist dashboard summary | PASS | 200 |  |
 | Buyer cannot access artist summary | PASS | 403 |  |
 | Label cannot access artist summary | PASS | 403 |  |
@@ -96,16 +102,22 @@ API Base: http://localhost:3000
 | Artist cannot access label orders | PASS | 403 |  |
 | Admin cannot access label orders | PASS | 403 |  |
 | Artist cannot list orders | PASS | 403 |  |
-| Artist creates drop draft | PASS | 201 |  |
+| Admin creates artist drop draft | PASS | 201 |  |
+| Artist scoped drops list includes own drop | PASS | 200 |  |
+| Artist cannot create drop via artist scope | PASS | 403 |  |
 | Buyer cannot see draft drop | PASS | 404 |  |
-| Artist attaches product to drop | PASS | 200 |  |
+| Admin attaches product to drop | PASS | 200 |  |
+| Artist cannot attach product in artist scope | PASS | 403 |  |
+| Admin creates foreign artist drop | PASS | 201 |  |
+| Artist cannot publish foreign drop (403) | PASS | 403 |  |
+| Artist cannot unpublish foreign drop (403) | PASS | 403 |  |
 | Buyer order events include placed | PASS | 200 |  |
-| Artist publishes drop | PASS | 200 |  |
+| Artist publishes own drop via artist scope | PASS | 200 |  |
 | Buyer views published drop | PASS | 200 |  |
 | Buyer views drop products | PASS | 200 |  |
 | Buyer sees featured drops | PASS | 200 |  |
-| Artist unpublishes drop | PASS | 200 |  |
+| Artist unpublishes own drop via artist scope | PASS | 200 |  |
 | Buyer cannot see draft drop | PASS | 404 |  |
-| Artist archives drop | PASS | 200 |  |
+| Admin archives drop | PASS | 200 |  |
 | Buyer cannot see archived drop | PASS | 404 |  |
 | Buyer sees featured drops without archived | PASS | 200 |  |

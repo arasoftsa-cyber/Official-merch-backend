@@ -1,4 +1,5 @@
 const express = require("express");
+const path = require("path");
 let cors;
 try {
   cors = require("cors");
@@ -20,7 +21,8 @@ const paymentsRouter = require("./src/modules/payments/payments.routes");
 const leadsRouter = require("./src/modules/leads/lead.routes");
 const artistAccessRequestsRouter = require("./src/modules/artistAccessRequests/artistAccessRequests.routes");
 const artistAccessRequestsAdminRouter = require("./src/modules/artistAccessRequests/artistAccessRequests.admin.routes");
-const devRouter = require("./routes/dev.routes");
+const mediaAssetsRouter = require("./src/modules/mediaAssets/mediaAssets.routes");
+const devRoutesRouter = require("./routes/dev.routes");
 const { getDb } = require("./src/config/db");
 const { logRequest } = require("./src/middleware/logger");
 const { attachAuthUser } = require("./src/middleware/auth.middleware");
@@ -28,12 +30,28 @@ const { attachAuthUser } = require("./src/middleware/auth.middleware");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BUILD_ID = process.env.BUILD_ID || new Date().toISOString();
+const isProduction = process.env.NODE_ENV === "production";
+const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
+const smokeSeedEnv = String(process.env.SMOKE_SEED || "").toLowerCase();
+const smokeSeedEnabledEnv = String(process.env.SMOKE_SEED_ENABLED || "").toLowerCase();
+const ciSmokeEnv = String(process.env.CI_SMOKE || "").toLowerCase();
+const SMOKE_SEED_ENABLED =
+  !isProduction &&
+  (smokeSeedEnv === "1" ||
+    smokeSeedEnv === "true" ||
+    smokeSeedEnabledEnv === "1" ||
+    smokeSeedEnabledEnv === "true" ||
+    ciSmokeEnv === "1" ||
+    ciSmokeEnv === "true");
+const DEV_ROUTES_ENABLED = SMOKE_SEED_ENABLED || nodeEnv === "test";
 console.log("### BACKEND BUILD ID ###", BUILD_ID, "pid=", process.pid);
 console.log("BUILD_ID Value:", BUILD_ID);
+console.log("SMOKE_SEED_ENABLED", SMOKE_SEED_ENABLED);
 const deprecateMiddleware = (message) => (req, _res, next) => {
   console.warn(`[DEPRECATION] ${message}`);
   next();
 };
+const LABEL_ALIAS_SUNSET = new Date(Date.now() + 45 * 24 * 60 * 60 * 1000).toUTCString();
 const aliasDeprecationHeaders = ({ sunset, link }) => (req, res, next) => {
   res.setHeader("Deprecation", "true");
   res.setHeader("Sunset", sunset);
@@ -52,7 +70,6 @@ const legacyLabelPrefixWarning = (req, _res, next) => {
 const allowedOrigins = new Set([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
-  "http://76.13.241.27:5173",
   process.env.CLIENT_URL,
 ].filter(Boolean));
 
@@ -73,6 +90,7 @@ const corsOptions = {
 
 app.use(express.json());
 app.use(cors({ origin: true, credentials: true }));
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use(attachAuthUser);
 app.use(logRequest);
 
@@ -82,6 +100,92 @@ app.use((req, res, next) => {
 });
 
 const mountedRoutes = [];
+
+const normalizeMountPath = (layer) => {
+  if (layer?.path && typeof layer.path === "string") {
+    return layer.path;
+  }
+  const source = layer?.regexp?.source;
+  if (!source || source === "^\\/?(?=\\/|$)") {
+    return "";
+  }
+
+  let path = source
+    .replace(/\\\//g, "/")
+    .replace(/\\\./g, ".")
+    .replace(/\(\?:\(\[\^\\\/]\+\?\)\)/g, ":param")
+    .replace(/\(\?:\(\[\^\/]\+\?\)\)/g, ":param")
+    .replace(/\(\?:\[\^\/]\+\?\)/g, ":param")
+    .replace(/\(\?:\[\^\\\/]\+\?\)/g, ":param")
+    .replace(/\(\?:\(\[\^\/]\+\)\)/g, ":param")
+    .replace(/\(\?:\(\[\^\\\/]\+\)\)/g, ":param")
+    .replace(/\(\?:\[\^\/]\+\)/g, ":param")
+    .replace(/\(\?:\[\^\\\/]\+\)/g, ":param")
+    .replace(/\\\/\?\(\?=\/\|\$\)/g, "")
+    .replace(/\/\?\(\?=\/\|\$\)/g, "")
+    .replace(/\(\?=\/\|\$\)/g, "")
+    .replace(/\\\/\?\$/g, "")
+    .replace(/\\\/\?/g, "/")
+    .replace(/\$$/, "")
+    .replace(/^\^/, "");
+
+  if (path === "/") return "";
+  if (!path.startsWith("/")) {
+    path = `/${path}`;
+  }
+  return path.replace(/\/{2,}/g, "/").replace(/\/$/, "");
+};
+
+const collectRoutes = (stack, prefix = "") => {
+  const rows = [];
+  if (!Array.isArray(stack)) return rows;
+
+  for (const layer of stack) {
+    if (layer?.route?.path) {
+      const methods = Object.keys(layer.route.methods || {})
+        .filter((method) => layer.route.methods[method])
+        .map((method) => method.toUpperCase());
+      const routePaths = Array.isArray(layer.route.path)
+        ? layer.route.path
+        : [layer.route.path];
+
+      for (const method of methods) {
+        for (const routePath of routePaths) {
+          const joined = `${prefix}${routePath}`.replace(/\/{2,}/g, "/");
+          rows.push({ method, path: joined });
+        }
+      }
+      continue;
+    }
+
+    if (layer?.name === "router" && Array.isArray(layer?.handle?.stack)) {
+      const mount = normalizeMountPath(layer);
+      rows.push(...collectRoutes(layer.handle.stack, `${prefix}${mount}`));
+    }
+  }
+
+  return rows;
+};
+
+const collectRouterDirectRoutes = (router) => {
+  if (!router || !Array.isArray(router.stack)) return [];
+  const rows = [];
+  for (const layer of router.stack) {
+    if (!layer?.route?.path) continue;
+    const methods = Object.keys(layer.route.methods || {})
+      .filter((method) => layer.route.methods[method])
+      .map((method) => method.toUpperCase());
+    const routePaths = Array.isArray(layer.route.path)
+      ? layer.route.path
+      : [layer.route.path];
+    for (const method of methods) {
+      for (const routePath of routePaths) {
+        rows.push({ method, path: String(routePath) });
+      }
+    }
+  }
+  return rows;
+};
 
 mountedRoutes.push("/api/auth");
 app.use("/api/auth", authRoutes);
@@ -108,7 +212,7 @@ mountedRoutes.push("/api/label/dashboard (alias)");
 app.use(
   "/api/label/dashboard",
   aliasDeprecationHeaders({
-    sunset: "2026-04-16T00:00:00.000Z",
+    sunset: LABEL_ALIAS_SUNSET,
     link: "/api/labels/dashboard",
   }),
   legacyLabelPrefixWarning,
@@ -118,7 +222,7 @@ mountedRoutes.push("/api/label (alias)");
 app.use(
   "/api/label",
   aliasDeprecationHeaders({
-    sunset: "2026-04-16T00:00:00.000Z",
+    sunset: LABEL_ALIAS_SUNSET,
     link: "/api/labels",
   }),
   legacyLabelPrefixWarning,
@@ -150,11 +254,97 @@ app.use("/api", productVariantsRouter);
 mountedRoutes.push("/api/artist-access-requests");
 app.use("/api/artist-access-requests", artistAccessRequestsRouter);
 
+mountedRoutes.push("/api/media-assets");
+app.use("/api/media-assets", mediaAssetsRouter);
+
 mountedRoutes.push("/api/admin/artist-access-requests");
 app.use("/api/admin/artist-access-requests", artistAccessRequestsAdminRouter);
 
-mountedRoutes.push("/api/dev");
-app.use("/api", devRouter);
+if (DEV_ROUTES_ENABLED) {
+  app.post("/api/dev/link-label-user", async (req, res) => {
+    try {
+      const body = req.body || {};
+      const userIdRaw = typeof body.userId === "string" ? body.userId.trim() : "";
+      const emailRaw =
+        typeof body.email === "string"
+          ? body.email.trim().toLowerCase()
+          : typeof body.userEmail === "string"
+          ? body.userEmail.trim().toLowerCase()
+          : "";
+      const labelIdRaw = typeof body.labelId === "string" ? body.labelId.trim() : "";
+      const labelHandleRaw =
+        typeof body.labelHandle === "string"
+          ? body.labelHandle.trim().toLowerCase()
+          : typeof body.handle === "string"
+          ? body.handle.trim().toLowerCase()
+          : "";
+
+      // Smoke route probe should never 404; allow empty payload to return OK.
+      if ((!userIdRaw && !emailRaw) && (!labelIdRaw && !labelHandleRaw)) {
+        return res.status(200).json({ ok: true });
+      }
+
+      const db = getDb();
+      const resolvedUserId =
+        userIdRaw ||
+        (
+          await db("users")
+            .whereRaw("lower(email) = ?", [emailRaw])
+            .first("id")
+        )?.id;
+      if (!resolvedUserId) {
+        return res.status(200).json({ ok: true });
+      }
+
+      const resolvedLabelId =
+        labelIdRaw ||
+        (
+          await db("labels")
+            .whereRaw("lower(handle) = ?", [labelHandleRaw])
+            .first("id")
+        )?.id;
+      if (!resolvedLabelId) {
+        return res.status(200).json({ ok: true });
+      }
+
+      await db("label_users_map")
+        .insert({
+          user_id: resolvedUserId,
+          label_id: resolvedLabelId,
+          created_at: db.fn.now(),
+        })
+        .onConflict("user_id")
+        .merge({ label_id: resolvedLabelId });
+
+      return res.status(200).json({ ok: true, userId: resolvedUserId, labelId: resolvedLabelId });
+    } catch (err) {
+      return res.status(200).json({ ok: true });
+    }
+  });
+
+  mountedRoutes.push('/api/dev');
+  app.use('/api/dev', devRoutesRouter);
+  console.log("DEV_ROUTES_MOUNTED /api/dev", {
+    nodeEnv: process.env.NODE_ENV,
+    smoke: SMOKE_SEED_ENABLED,
+  });
+}
+
+app.get("/api/dev/_routes", (req, res) => {
+  const stack = app?._router?.stack || app?.router?.stack || [];
+  const routes = collectRoutes(stack);
+  const devRoutes = DEV_ROUTES_ENABLED ? collectRouterDirectRoutes(devRoutesRouter) : [];
+  const key = (row) => `${row.method}:${row.path}`;
+  const seen = new Set(routes.map(key));
+  for (const row of devRoutes) {
+    const routeKey = key(row);
+    if (!seen.has(routeKey)) {
+      seen.add(routeKey);
+      routes.push(row);
+    }
+  }
+  return res.json(routes);
+});
 
 app.get("/api/_meta/dashboards", (req, res) => {
   res.json({

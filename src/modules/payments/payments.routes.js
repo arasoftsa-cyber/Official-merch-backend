@@ -20,16 +20,61 @@ router.post("/mock/confirm/:paymentId", async (req, res, next) => {
       return res.status(404).json({ error: "payment_not_found" });
     }
 
-    await db("payments").where({ id: paymentId }).update({
-      status: "paid",
-      updated_at: db.fn.now(),
-    });
+    if (payment.status !== "paid") {
+      await db.transaction(async (trx) => {
+        const now = trx.fn.now();
+        await trx("payments").where({ id: paymentId }).update({
+          status: "paid",
+          paid_at: now,
+          updated_at: now,
+        });
+
+        const existingPaymentEvent = await trx("payment_events")
+          .where({
+            payment_id: paymentId,
+            provider: "mock",
+            event_type: "payment_paid",
+          })
+          .first("id");
+        if (!existingPaymentEvent) {
+          await trx("payment_events").insert({
+            payment_id: paymentId,
+            provider: "mock",
+            event_type: "payment_paid",
+            payload_json: {
+              source: "mock_confirm",
+              paymentId,
+              orderId: payment.order_id,
+            },
+          });
+        }
+
+        const order = await trx("orders")
+          .where({ id: payment.order_id })
+          .first("id", "buyer_user_id");
+        const actorUserId = req.user?.id || order?.buyer_user_id || null;
+        if (order?.id && actorUserId) {
+          const existingPaidEvent = await trx("order_events")
+            .where({ order_id: order.id, type: "paid" })
+            .first("id");
+          if (!existingPaidEvent) {
+            await trx("order_events").insert({
+              order_id: order.id,
+              type: "paid",
+              actor_user_id: actorUserId,
+              created_at: now,
+            });
+          }
+        }
+      });
+    }
 
     return res.json({
       ok: true,
       paymentId: payment.id,
       orderId: payment.order_id,
       status: "paid",
+      idempotent: payment.status === "paid",
     });
   } catch (err) {
     next(err);
