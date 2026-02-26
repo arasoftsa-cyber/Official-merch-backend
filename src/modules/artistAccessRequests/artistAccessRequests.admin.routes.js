@@ -5,6 +5,8 @@ const { requireAuth } = require("../../middleware/auth.middleware");
 const { requirePolicy } = require("../../middleware/policy.middleware");
 const { hashPassword } = require("../../utils/password");
 const { signToken } = require("../../utils/jwt");
+const { copyRequestProfilePhotoToArtist } = require("./artistAccessRequests.service");
+const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const ROUTER = express.Router();
 const STATUS_OPTIONS = new Set(["pending", "approved", "rejected"]);
@@ -41,8 +43,9 @@ const mapRow = (row) => ({
   phone: row.phone || row.contact_phone || "",
   socials: row.socials || [],
   aboutMe: row.about_me || row.pitch || "",
-  profilePhotoUrl:
-    row.profile_photo_media_url || row.profile_photo_url || row.profile_photo_path || "",
+  profilePhotoUrl: toAbsolutePublicUrl(
+    row.profile_photo_media_url || row.profile_photo_url || row.profile_photo_path || ""
+  ),
   messageForFans: row.message_for_fans || "",
   rejectionComment: row.rejection_comment || "",
 });
@@ -198,45 +201,6 @@ const createArtistFromRequest = async (trx, request, userId) => {
   return artistRow;
 };
 
-const carryOverProfilePhotoLink = async (trx, requestId, artistId) => {
-  const hasEntityMediaLinks = await trx.schema.hasTable("entity_media_links");
-  const hasMediaAssets = await trx.schema.hasTable("media_assets");
-  if (!hasEntityMediaLinks || !hasMediaAssets) return;
-
-  const linkColumns = await trx("entity_media_links").columnInfo();
-  const sourceLink = await trx("entity_media_links")
-    .where({
-      entity_type: "artist_access_request",
-      entity_id: requestId,
-      role: "profile_photo",
-    })
-    .orderBy("sort_order", "asc")
-    .first("media_asset_id");
-  if (!sourceLink?.media_asset_id) return;
-
-  const existingArtistPhoto = await trx("entity_media_links")
-    .where({
-      entity_type: "artist",
-      entity_id: artistId,
-      role: "profile_photo",
-    })
-    .first("id");
-  if (existingArtistPhoto?.id) return;
-
-  const insertPayload = {
-    id: randomUUID(),
-    media_asset_id: sourceLink.media_asset_id,
-    entity_type: "artist",
-    entity_id: artistId,
-    role: "profile_photo",
-    sort_order: 0,
-  };
-  if (Object.prototype.hasOwnProperty.call(linkColumns, "created_at")) {
-    insertPayload.created_at = trx.fn.now();
-  }
-  await trx("entity_media_links").insert(insertPayload);
-};
-
 const buildResetLink = (user) => {
   const base =
     process.env.FRONTEND_URL || process.env.CLIENT_URL || "http://localhost:5173";
@@ -296,7 +260,17 @@ const processApproval = async ({ id, adminId }) => {
 
     const user = await resolveOrCreateArtistUser(trx, requestEmail);
     const artist = await createArtistFromRequest(trx, request, user.id);
-    await carryOverProfilePhotoLink(trx, id, artist.id);
+    const photoLinkResult = await copyRequestProfilePhotoToArtist({
+      db: getDb(),
+      trx,
+      requestId: id,
+      artistId: artist.id,
+    });
+    console.log("[artist-approve] copy profile photo", {
+      requestId: id,
+      artistId: artist.id,
+      result: photoLinkResult,
+    });
 
     const requestColumns = await trx("artist_access_requests").columnInfo();
     const updates = {

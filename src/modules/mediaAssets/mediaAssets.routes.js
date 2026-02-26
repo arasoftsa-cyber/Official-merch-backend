@@ -3,9 +3,11 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../../config/db");
+const { UPLOADS_DIR } = require("../../config/paths");
+const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const router = express.Router();
-const UPLOAD_DIR = path.join(process.cwd(), "uploads", "media-assets");
+const UPLOAD_DIR = path.join(UPLOADS_DIR, "media-assets");
 
 const parseContentDisposition = (line) => {
   const nameMatch = line.match(/name="([^"]+)"/i);
@@ -116,13 +118,6 @@ const saveUploadedFile = async (file) => {
   return `/uploads/media-assets/${filename}`;
 };
 
-const buildAbsoluteUrl = (req, relativePath) => {
-  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
-  const protocol = forwardedProto || req.protocol || "http";
-  const host = req.get("host") || "localhost:3000";
-  return `${protocol}://${host}${relativePath}`;
-};
-
 router.post("/", async (req, res) => {
   try {
     const multipart = await parseMultipartFormData(req);
@@ -136,7 +131,7 @@ router.post("/", async (req, res) => {
     }
 
     const relativeUrl = await saveUploadedFile(upload);
-    const publicUrl = buildAbsoluteUrl(req, relativeUrl);
+    const publicUrl = toAbsolutePublicUrl(relativeUrl);
     const id = randomUUID();
 
     const db = getDb();

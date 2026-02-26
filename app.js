@@ -1,5 +1,4 @@
 const express = require("express");
-const path = require("path");
 let cors;
 try {
   cors = require("cors");
@@ -24,6 +23,7 @@ const artistAccessRequestsAdminRouter = require("./src/modules/artistAccessReque
 const mediaAssetsRouter = require("./src/modules/mediaAssets/mediaAssets.routes");
 const devRoutesRouter = require("./routes/dev.routes");
 const { getDb } = require("./src/config/db");
+const { UPLOADS_DIR } = require("./src/config/paths");
 const { logRequest } = require("./src/middleware/logger");
 const { attachAuthUser } = require("./src/middleware/auth.middleware");
 
@@ -90,7 +90,8 @@ const corsOptions = {
 
 app.use(express.json());
 app.use(cors({ origin: true, credentials: true }));
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+app.use("/uploads", express.static(UPLOADS_DIR));
+console.log("[static] uploads served from", UPLOADS_DIR);
 app.use(attachAuthUser);
 app.use(logRequest);
 

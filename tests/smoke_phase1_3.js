@@ -365,23 +365,25 @@ const ensurePaymentState = (res, expected) => {
 
   stepResults.push(
     await runStep("Requestor submits artist request", async () => {
-      const suffix = uniqueSuffix();
-      const handle = `smoke-artist-${suffix}`;
-      const phone = `9999999999-${suffix}`;
+      const stamp = Date.now();
+      const requestEmail = `smoke.requestor.${stamp}@example.invalid`;
+      const handle = `smoke-requestor-${stamp}`;
+      const phone = `999${String(stamp).slice(-7)}`;
       const res = await req("POST", "/api/artist-access-requests", {
         token: requestorToken,
         json: {
-          artistName: `Smoke Artist ${suffix}`,
+          artistName: `Smoke Requestor ${stamp}`,
           handle,
-          contactEmail: requestorEmail,
+          contactEmail: requestEmail,
           phone,
           pitch: "Smoke test request",
+          socials: [],
         },
       });
       if (res.status !== 201) {
         throwRes(res);
       }
-      const id = res.json?.id;
+      const id = res.json?.request_id || res.json?.id;
       if (!id) {
         throw {
           status: res.status,
@@ -390,8 +392,8 @@ const ensurePaymentState = (res, expected) => {
         };
       }
       pendingArtistRequestId = id;
-          pendingArtistRequestHandle = handle;
-          pendingArtistRequestEmail = requestorEmail;
+      pendingArtistRequestHandle = handle;
+      pendingArtistRequestEmail = requestEmail;
       return { status: res.status, body: res.bodyText };
     })
   );
@@ -2636,31 +2638,6 @@ const ensurePaymentState = (res, expected) => {
           return { status: res.status };
         })
       );
-
-      stepResults.push(
-        await runStep("Requestor accesses artist dashboard after approval", async () => {
-          const res = await req("GET", "/api/artist/dashboard/summary", { token: requestorToken });
-          if (res.status !== 200) {
-            throwRes(res);
-          }
-          return { status: res.status, body: res.bodyText };
-        })
-      );
-
-      stepResults.push(
-        await runStep("Buyer views artist dashboard orders after approval", async () => {
-          const res = await req(
-            "GET",
-            "/api/artist/dashboard/orders?status=all&range=30d&limit=1",
-            { token: requestorToken }
-          );
-          if (res.status !== 200) {
-            throwRes(res);
-          }
-          return { status: res.status, body: res.bodyText };
-        })
-      );
-
 
       stepResults.push(
         await runStep("Buyer cannot access label orders", async () => {

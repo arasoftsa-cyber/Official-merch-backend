@@ -5,6 +5,7 @@ const { requireAuth } = require("../../middleware/auth.middleware");
 const { requirePolicy } = require("../../middleware/policy.middleware");
 const { listFlags } = require("../../utils/abuseFlags");
 const { createProductWithVariants } = require("../../modules/catalog/catalog.service");
+const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const router = express.Router();
 
@@ -859,7 +860,10 @@ router.get("/artists/:id", requireAuth, async (req, res) => {
         .orderBy("eml.sort_order", "asc")
         .select("ma.public_url")
         .first();
-      profilePhotoUrl = String(mediaRow?.public_url ?? "").trim();
+      profilePhotoUrl = toAbsolutePublicUrl(mediaRow?.public_url);
+    }
+    if (!profilePhotoUrl && Object.prototype.hasOwnProperty.call(artistColumns, "profile_photo_url")) {
+      profilePhotoUrl = toAbsolutePublicUrl(artist.profile_photo_url);
     }
 
     const status =
@@ -904,6 +908,7 @@ router.get("/artists/:id", requireAuth, async (req, res) => {
       aboutMe,
       messageForFans,
       socials: Array.isArray(socials) ? socials : [],
+      profile_photo_url: profilePhotoUrl,
       profilePhotoUrl,
     });
   } catch (err) {
