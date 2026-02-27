@@ -26,16 +26,43 @@ const formatVariant = (row) => {
   };
 };
 
-const validateVariant = (variant) => {
-  if (!variant) return "variant_missing";
-  if (!variant.sku || !variant.sku.trim()) return "invalid_sku";
-  if (!variant.size || !variant.size.trim()) return "invalid_size";
-  if (!variant.color || !variant.color.trim()) return "invalid_color";
-  const price = Number(variant.priceCents);
-  if (!Number.isFinite(price) || price <= 0) return "invalid_price";
-  const stock = Number(variant.stock);
-  if (!Number.isInteger(stock) || stock < 0) return "invalid_stock";
-  return null;
+const parseNonNegativeInt = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || !Number.isInteger(numberValue) || numberValue < 0) {
+    return null;
+  }
+  return numberValue;
+};
+
+const normalizeVariant = (variant) => {
+  if (!variant || typeof variant !== "object") {
+    return { error: "variant_missing" };
+  }
+
+  const sku = String(variant.sku || "").trim();
+  if (!sku) return { error: "invalid_sku" };
+
+  const price = parseNonNegativeInt(variant.priceCents ?? variant.price_cents);
+  if (price === null) return { error: "invalid_price" };
+
+  const stock = parseNonNegativeInt(variant.stock);
+  if (stock === null) return { error: "invalid_stock" };
+
+  const idValue = String(variant.id || "").trim();
+  const size = String(variant.size || "").trim() || "default";
+  const color = String(variant.color || "").trim() || "default";
+
+  return {
+    value: {
+      id: idValue || null,
+      sku,
+      size,
+      color,
+      price_cents: price,
+      stock,
+    },
+  };
 };
 
 router.get(
@@ -54,9 +81,11 @@ router.get(
       const rows = await db("product_variants")
         .where({ product_id: req.params.id })
         .orderBy("created_at", "asc");
+      const variants = rows.map(formatVariant);
       return res.json({
         productId: product.id,
-        variants: rows.map(formatVariant),
+        variants,
+        items: variants,
       });
     } catch (err) {
       next(err);
@@ -83,71 +112,83 @@ router.put(
         return res.status(404).json({ error: "product_not_found" });
       }
       const normalized = [];
-      const toUpdate = [];
-      const toInsert = [];
       payload.variants.forEach((variant) => {
-        const error = validateVariant(variant);
-        if (error) {
-          throw { error };
+        const normalizedRow = normalizeVariant(variant);
+        if (normalizedRow.error) {
+          throw { error: normalizedRow.error };
         }
-        const normalizedVariant = {
-          id: variant.id,
-          sku: variant.sku.trim(),
-          size: variant.size.trim(),
-          color: variant.color.trim(),
-          price_cents: Number(variant.priceCents),
-          stock: Number(variant.stock),
-        };
-        normalized.push(normalizedVariant);
-        if (variant.id) {
-          toUpdate.push(normalizedVariant);
-        } else {
-          toInsert.push(normalizedVariant);
-        }
+        normalized.push(normalizedRow.value);
       });
+
       await db.transaction(async (trx) => {
         const existing = await trx("product_variants")
-          .select("id")
+          .select("id", "sku")
           .where({ product_id: req.params.id });
-        const incomingIds = new Set(
-          normalized.filter((v) => v.id).map((v) => v.id)
-        );
-        await trx("product_variants")
-          .where({ product_id: req.params.id })
-          .whereNotIn(
-            "id",
-            Array.from(incomingIds).filter(Boolean)
-          )
-          .del();
-        for (const variant of toUpdate) {
-          await trx("product_variants")
-            .where({ id: variant.id, product_id: req.params.id })
-            .update({
-              sku: variant.sku,
-              size: variant.size,
-              color: variant.color,
-              price_cents: variant.price_cents,
-              stock: variant.stock,
-            });
-        }
-        for (const variant of toInsert) {
-          await trx("product_variants").insert({
-            product_id: req.params.id,
+        const byId = new Map(existing.map((row) => [row.id, row]));
+        const bySku = new Map(existing.map((row) => [row.sku, row]));
+        const keepVariantIds = new Set();
+
+        for (const variant of normalized) {
+          const updatePayload = {
             sku: variant.sku,
             size: variant.size,
             color: variant.color,
             price_cents: variant.price_cents,
             stock: variant.stock,
-            created_at: trx.fn.now(),
-          });
+          };
+
+          if (variant.id && byId.has(variant.id)) {
+            await trx("product_variants")
+              .where({ id: variant.id, product_id: req.params.id })
+              .update(updatePayload);
+            keepVariantIds.add(variant.id);
+            continue;
+          }
+
+          const rowBySku = bySku.get(variant.sku);
+          if (rowBySku?.id) {
+            await trx("product_variants")
+              .where({ id: rowBySku.id, product_id: req.params.id })
+              .update(updatePayload);
+            keepVariantIds.add(rowBySku.id);
+            continue;
+          }
+
+          const [inserted] = await trx("product_variants")
+            .insert({
+              product_id: req.params.id,
+              sku: variant.sku,
+              size: variant.size,
+              color: variant.color,
+              price_cents: variant.price_cents,
+              stock: variant.stock,
+              created_at: trx.fn.now(),
+            })
+            .returning(["id"]);
+          const insertedId = inserted?.id;
+          if (insertedId) {
+            keepVariantIds.add(insertedId);
+            bySku.set(variant.sku, { id: insertedId, sku: variant.sku });
+          }
+        }
+
+        if (normalized.length === 0) {
+          await trx("product_variants").where({ product_id: req.params.id }).del();
+        } else {
+          await trx("product_variants")
+            .where({ product_id: req.params.id })
+            .whereNotIn("id", Array.from(keepVariantIds))
+            .del();
         }
       });
       const rows = await db("product_variants")
         .where({ product_id: req.params.id })
         .orderBy("created_at", "asc");
+      const variants = rows.map(formatVariant);
       return res.json({
         productId: req.params.id,
-        variants: rows.map(formatVariant),
+        variants,
+        items: variants,
       });
     } catch (err) {
       if (err?.error) {

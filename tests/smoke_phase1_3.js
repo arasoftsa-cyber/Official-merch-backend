@@ -34,15 +34,28 @@ const reportEntries = [];
 const uniqueSuffix = () => {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 };
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+tmk8AAAAASUVORK5CYII=";
+
+const toUploadsProductsPath = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    return parsed.pathname || "";
+  } catch (_err) {
+    return raw;
+  }
+};
 
 const SEEDED_DROP_HANDLE = "seed-drop";
 
-const req = async (method, path, { token, json, headers: extraHeaders } = {}) => {
+const req = async (method, path, { token, json, formData, headers: extraHeaders } = {}) => {
   const headers = {
     Accept: "application/json",
     "x-smoke-test": "1",
   };
-  if (json) headers["Content-Type"] = "application/json";
+  if (json && !formData) headers["Content-Type"] = "application/json";
   if (token) headers.Authorization = `Bearer ${token}`;
   if (extraHeaders) {
     Object.assign(headers, extraHeaders);
@@ -51,7 +64,7 @@ const req = async (method, path, { token, json, headers: extraHeaders } = {}) =>
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
     headers,
-    body: json ? JSON.stringify(json) : undefined,
+    body: formData ? formData : json ? JSON.stringify(json) : undefined,
   });
 
   const bodyText = await response.text();
@@ -70,6 +83,27 @@ const req = async (method, path, { token, json, headers: extraHeaders } = {}) =>
     path,
   };
 };
+
+const buildNewMerchCreateFormData = ({ artistId, suffix }) => {
+  const fd = new FormData();
+  fd.append("artist_id", artistId);
+  fd.append("merch_name", `Catalog Tee ${suffix}`);
+  fd.append("merch_story", "Smoke test merch story long enough.");
+  fd.append("vendor_pay", "8.00");
+  fd.append("our_share", "7.00");
+  fd.append("royalty", "4.99");
+  fd.append("merch_type", "tshirt");
+  fd.append("colors", JSON.stringify(["black"]));
+
+  for (let i = 1; i <= 4; i += 1) {
+    const buffer = Buffer.from(TINY_PNG_BASE64, "base64");
+    const blob = new Blob([buffer], { type: "image/png" });
+    fd.append(`listing_photo_${i}`, blob, `smoke-listing-${i}.png`);
+  }
+
+  return fd;
+};
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const logSkip = (name, reason) => {
@@ -755,26 +789,43 @@ const ensurePaymentState = (res, expected) => {
 
   stepResults.push(
     await runStep("Admin creates product", async () => {
+      const createSuffix = uniqueSuffix();
+      const formData = buildNewMerchCreateFormData({ artistId, suffix: createSuffix });
       const res = await req("POST", "/api/admin/products", {
         token: adminToken,
-        json: {
-          artistId,
-          title: "Catalog Tee",
-          description: "Smoke test product",
-          price: "19.99",
-          stock: 25,
-        },
+        formData,
       });
       if (res.status !== 201) {
         throwRes(res);
       }
-      const product = res.json?.product;
-      productId = product?.id;
+      productId = res.json?.product_id || res.json?.productId || res.json?.product?.id;
       if (!productId) {
         throw {
           status: res.status,
           body: res.bodyText,
           message: "missing productId",
+        };
+      }
+
+      const listingPhotoUrls = Array.isArray(res.json?.listingPhotoUrls)
+        ? res.json.listingPhotoUrls
+        : [];
+      if (listingPhotoUrls.length !== 4) {
+        throw {
+          status: res.status,
+          body: res.bodyText,
+          message: `expected 4 listingPhotoUrls, got ${listingPhotoUrls.length}`,
+        };
+      }
+      if (
+        !listingPhotoUrls.every((entry) =>
+          toUploadsProductsPath(entry).startsWith("/uploads/products/")
+        )
+      ) {
+        throw {
+          status: res.status,
+          body: res.bodyText,
+          message: "listingPhotoUrls path mismatch",
         };
       }
       return { status: res.status, body: res.bodyText };
@@ -790,17 +841,45 @@ const ensurePaymentState = (res, expected) => {
           message: "missing productId",
         };
       }
-      const uniqueSku = `ADM-${Date.now()}`;
+
+      const initialReadRes = await req("GET", `/api/admin/products/${productId}/variants`, {
+        token: adminToken,
+      });
+      if (initialReadRes.status !== 200) {
+        throwRes(initialReadRes);
+      }
+
+      const initialVariants = Array.isArray(initialReadRes.json?.items)
+        ? initialReadRes.json.items
+        : Array.isArray(initialReadRes.json?.variants)
+        ? initialReadRes.json.variants
+        : Array.isArray(initialReadRes.json)
+        ? initialReadRes.json
+        : [];
+      if (initialVariants.length < 1) {
+        throw {
+          status: initialReadRes.status,
+          body: initialReadRes.bodyText,
+          message: "expected at least one default variant after create",
+        };
+      }
+
+      const baseVariant = initialVariants[0] || {};
+      const uniqueSku = String(baseVariant.sku || `ADM-${Date.now()}`);
+      const targetPriceCents = 2199;
+      const targetStock = 11;
+
       const writeRes = await req("PUT", `/api/admin/products/${productId}/variants`, {
         token: adminToken,
         json: {
           variants: [
             {
+              id: baseVariant.id,
               sku: uniqueSku,
-              size: "L",
-              color: "Black",
-              priceCents: 1999,
-              stock: 10,
+              size: baseVariant.size || "default",
+              color: baseVariant.color || "default",
+              priceCents: targetPriceCents,
+              stock: targetStock,
             },
           ],
         },
@@ -808,14 +887,25 @@ const ensurePaymentState = (res, expected) => {
       if (writeRes.status !== 200) {
         throwRes(writeRes);
       }
-      if (!Array.isArray(writeRes.json?.variants) || writeRes.json.variants.length === 0) {
+      const writtenVariants = Array.isArray(writeRes.json?.items)
+        ? writeRes.json.items
+        : Array.isArray(writeRes.json?.variants)
+        ? writeRes.json.variants
+        : Array.isArray(writeRes.json)
+        ? writeRes.json
+        : [];
+      if (writtenVariants.length === 0) {
         throw {
           status: writeRes.status,
           body: writeRes.bodyText,
           message: "no variants after admin update",
         };
       }
-      variantId = writeRes.json.variants[0]?.id;
+      const writtenVariant =
+        writtenVariants.find((row) => row.id === baseVariant.id) ||
+        writtenVariants.find((row) => row.sku === uniqueSku) ||
+        writtenVariants[0];
+      variantId = writtenVariant?.id;
       if (!variantId) {
         throw {
           status: writeRes.status,
@@ -829,11 +919,35 @@ const ensurePaymentState = (res, expected) => {
       if (readRes.status !== 200) {
         throwRes(readRes);
       }
-      if (!Array.isArray(readRes.json?.variants) || !readRes.json.variants.some((row) => row.id === variantId)) {
+      const persistedVariants = Array.isArray(readRes.json?.items)
+        ? readRes.json.items
+        : Array.isArray(readRes.json?.variants)
+        ? readRes.json.variants
+        : Array.isArray(readRes.json)
+        ? readRes.json
+        : [];
+      const persisted =
+        persistedVariants.find((row) => row.id === variantId) ||
+        persistedVariants.find((row) => row.sku === uniqueSku);
+      if (!persisted) {
         throw {
           status: readRes.status,
           body: readRes.bodyText,
           message: "admin variant readback missing",
+        };
+      }
+      if (Number(persisted.priceCents) !== targetPriceCents) {
+        throw {
+          status: readRes.status,
+          body: readRes.bodyText,
+          message: `variant price not persisted (${persisted.priceCents})`,
+        };
+      }
+      if (Number(persisted.stock) !== targetStock) {
+        throw {
+          status: readRes.status,
+          body: readRes.bodyText,
+          message: `variant stock not persisted (${persisted.stock})`,
         };
       }
       return { status: writeRes.status, body: writeRes.bodyText };
@@ -1063,11 +1177,48 @@ const ensurePaymentState = (res, expected) => {
         if (res.status !== 200) {
           throwRes(res);
         }
+        const product = res.json?.product || {};
+        const photos = Array.isArray(product?.photos)
+          ? product.photos
+          : Array.isArray(product?.listingPhotoUrls)
+          ? product.listingPhotoUrls
+          : Array.isArray(res.json?.photos)
+          ? res.json.photos
+          : [];
+        if (photos.length !== 4) {
+          throw {
+            status: res.status,
+            body: res.bodyText,
+            message: `expected photos length 4, got ${photos.length}`,
+          };
+        }
+
+        const primaryPhotoUrl =
+          (typeof product?.primaryPhotoUrl === "string" && product.primaryPhotoUrl) ||
+          (typeof res.json?.primaryPhotoUrl === "string" && res.json.primaryPhotoUrl) ||
+          photos[0] ||
+          "";
+        if (!toUploadsProductsPath(primaryPhotoUrl).startsWith("/uploads/products/")) {
+          throw {
+            status: res.status,
+            body: res.bodyText,
+            message: "primaryPhotoUrl path mismatch",
+          };
+        }
+
         if (!Array.isArray(res.json?.variants) || res.json.variants.length === 0) {
           throw {
             status: res.status,
             body: res.bodyText,
             message: "no variants",
+          };
+        }
+        const productPriceCents = Number(product?.priceCents);
+        if (!Number.isFinite(productPriceCents) || productPriceCents <= 0) {
+          throw {
+            status: res.status,
+            body: res.bodyText,
+            message: "product priceCents missing from variants",
           };
         }
         if (!variantId) {

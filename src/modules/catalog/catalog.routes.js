@@ -8,6 +8,7 @@ const {
   getProduct,
   createProduct,
   updateProduct,
+  updateProductPhotos,
 } = require("./catalog.controller");
 
 const { getDb } = require("../../config/db");
@@ -124,6 +125,14 @@ router.patch(
   requirePolicy("catalog:product:update", "self", catalogPolicyCtx),
   express.json(),
   updateProduct
+);
+router.put(
+  "/admin/products/:id/photos",
+  requireAuth,
+  requireAdmin,
+  rejectLabelMutations,
+  requirePolicy("catalog:product:update", "self", catalogPolicyCtx),
+  updateProductPhotos
 );
 
 module.exports = router;
