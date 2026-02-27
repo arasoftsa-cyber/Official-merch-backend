@@ -17,9 +17,14 @@ const findByHandle = async (handle) => {
 
 const listArtists = async ({ featured = false } = {}) => {
   const db = getDb();
-  let query = db("artists")
-    .select("id", "handle", "name", "theme_json", "created_at")
-    .orderBy("created_at", "desc");
+  const hasProfilePhotoUrl = await db.schema.hasColumn("artists", "profile_photo_url");
+  const hasStatus = await db.schema.hasColumn("artists", "status");
+
+  const selectColumns = ["id", "handle", "name", "theme_json", "created_at"];
+  if (hasProfilePhotoUrl) selectColumns.push("profile_photo_url");
+  if (hasStatus) selectColumns.push("status");
+
+  let query = db("artists").select(selectColumns).orderBy("created_at", "desc");
 
   if (featured) {
     const hasFeatured = await db.schema.hasColumn("artists", "is_featured");
