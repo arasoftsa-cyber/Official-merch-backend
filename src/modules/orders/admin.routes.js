@@ -909,6 +909,9 @@ const fetchAdminArtistDetailPayload = async (db, artistId) => {
   const status =
     String(artist.status ?? latestApprovedRequest?.status ?? "active").trim().toLowerCase() ||
     "active";
+  const isFeatured = Object.prototype.hasOwnProperty.call(artistColumns, "is_featured")
+    ? Boolean(artist.is_featured)
+    : false;
 
   const phone = Object.prototype.hasOwnProperty.call(artistColumns, "phone")
     ? String(artist.phone ?? "").trim()
@@ -960,6 +963,8 @@ const fetchAdminArtistDetailPayload = async (db, artistId) => {
       name: artist.name ?? artist.artist_name ?? "",
       handle: String(artist.handle ?? "").replace(/^@/, ""),
       status,
+      is_featured: isFeatured,
+      isFeatured,
       email,
       phone,
       about: aboutMe,
@@ -990,6 +995,7 @@ router.get("/artists", requireAuth, async (req, res) => {
     if (hasArtistColumn("status")) selectColumns.push("status");
     if (hasArtistColumn("email")) selectColumns.push("email");
     if (hasArtistColumn("phone")) selectColumns.push("phone");
+    if (hasArtistColumn("is_featured")) selectColumns.push("is_featured");
     if (hasArtistColumn("created_at")) selectColumns.push("created_at");
 
     let query = db("artists").select(selectColumns).limit(200);
@@ -1113,6 +1119,8 @@ router.get("/artists", requireAuth, async (req, res) => {
             requestStatusByArtistId.get(r.id),
             linkedUsersCountByArtistId.get(r.id) || 0
           ),
+      is_featured: Boolean(r.is_featured),
+      isFeatured: Boolean(r.is_featured),
       email: normalizeText(r.email) || linkedEmailByArtistId.get(r.id) || "",
       phone: normalizeText(r.phone) || requestPhoneByArtistId.get(r.id) || "",
       createdAt: r.created_at ?? null,
@@ -1192,6 +1200,26 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
     const patch = {};
     let hasAnyUpdate = false;
     const ignoredFields = [];
+
+    if (hasPayloadKey("is_featured") || hasPayloadKey("isFeatured")) {
+      if (!hasArtistColumn("is_featured")) {
+        return res.status(400).json({
+          error: "validation",
+          details: [{ field: "is_featured", message: "is_featured is not editable on this deployment" }],
+        });
+      }
+      const rawFeatured = hasPayloadKey("is_featured")
+        ? payload.is_featured
+        : payload.isFeatured;
+      if (typeof rawFeatured !== "boolean") {
+        return res.status(400).json({
+          error: "validation",
+          details: [{ field: "is_featured", message: "is_featured must be a boolean" }],
+        });
+      }
+      patch.is_featured = rawFeatured;
+      hasAnyUpdate = true;
+    }
 
     if (hasPayloadKey("name")) {
       if (!(hasArtistColumn("name") || hasArtistColumn("artist_name"))) {

@@ -510,8 +510,10 @@ const attachListingPhotosToProducts = async (products = []) => {
     return products.map((product) => ({
       ...product,
       listingPhotoUrls: [],
+      listing_photos: [],
       photos: [],
       primaryPhotoUrl: "",
+      cover_photo_url: null,
     }));
   }
 
@@ -520,8 +522,10 @@ const attachListingPhotosToProducts = async (products = []) => {
     return products.map((product) => ({
       ...product,
       listingPhotoUrls: [],
+      listing_photos: [],
       photos: [],
       primaryPhotoUrl: "",
+      cover_photo_url: null,
     }));
   }
 
@@ -545,10 +549,12 @@ const attachListingPhotosToProducts = async (products = []) => {
   return products.map((product) => ({
     ...product,
     listingPhotoUrls: byProductId.get(product.id) || [],
+    listing_photos: byProductId.get(product.id) || [],
     photoUrls: byProductId.get(product.id) || [],
     photos: byProductId.get(product.id) || [],
     listingPhotoUrl: (byProductId.get(product.id) || [])[0] || "",
     primaryPhotoUrl: (byProductId.get(product.id) || [])[0] || "",
+    cover_photo_url: (byProductId.get(product.id) || [])[0] || null,
   }));
 };
 

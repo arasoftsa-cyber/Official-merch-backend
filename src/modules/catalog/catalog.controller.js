@@ -263,6 +263,7 @@ const getProduct = async (req, res) => {
   const primaryPhotoUrl = photos[0] || "";
   const normalizedProduct = {
     ...product,
+    listing_photos: photos,
     listingPhotoUrls: photos,
     photoUrls: photos,
     photos,
@@ -274,6 +275,7 @@ const getProduct = async (req, res) => {
 
   return res.json({
     product: normalizedProduct,
+    listing_photos: photos,
     listingPhotoUrl: primaryPhotoUrl,
     photoUrls: photos,
     photos,
