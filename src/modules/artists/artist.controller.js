@@ -119,35 +119,37 @@ const getArtists = async (req, res) => {
   const featured = req.query.featured === "1" || req.query.featured === "true";
   const rows = await artistService.listArtists({ featured });
   const formatted = rows.map((row) => formatArtist(row)).filter(Boolean);
+  const withMedia = await attachArtistMedia(formatted);
+  res.json({
+    artists: withMedia,
+  });
+};
+
+const attachArtistMedia = async (artists) => {
+  const safeArtists = Array.isArray(artists) ? artists : [];
+  if (safeArtists.length === 0) return [];
   const coverMap = await loadEntityMediaUrlMap(
     "artist",
-    formatted.map((artist) => artist.id)
+    safeArtists.map((artist) => artist.id)
   );
   const profilePhotoMap = await loadEntityMediaUrlMap(
     "artist",
-    formatted.map((artist) => artist.id),
+    safeArtists.map((artist) => artist.id),
     "profile_photo"
   );
-  const withCover = formatted.map((artist) => ({
+  return safeArtists.map((artist) => ({
     ...artist,
     coverUrl: coverMap.get(artist.id) || null,
     profile_photo_url:
       profilePhotoMap.get(artist.id) || artist.profile_photo_url || null,
   }));
-  res.json({
-    artists: withCover,
-  });
 };
 
 const getFeaturedArtists = async (req, res) => {
-  const db = getDb();
-  const rows = await db("artists")
-    .select("id", "handle", "name", "theme_json")
-    .where("is_featured", true)
-    .orderBy("created_at", "desc")
-    .limit(12);
-
-  res.status(200).json(rows);
+  const rows = await artistService.listFeaturedArtists();
+  const formatted = rows.map((row) => formatArtist(row)).filter(Boolean);
+  const withMedia = await attachArtistMedia(formatted);
+  res.status(200).json(withMedia);
 };
 
 module.exports = { getArtist, getShelf, getArtists, getFeaturedArtists };

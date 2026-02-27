@@ -43,11 +43,16 @@ const listFeaturedArtists = async () => {
   if (!hasFeatured) {
     return [];
   }
+  const hasProfilePhotoUrl = await db.schema.hasColumn("artists", "profile_photo_url");
+  const hasStatus = await db.schema.hasColumn("artists", "status");
+  const selectColumns = ["id", "handle", "name", "theme_json", "created_at"];
+  if (hasProfilePhotoUrl) selectColumns.push("profile_photo_url");
+  if (hasStatus) selectColumns.push("status");
   return db("artists")
-    .select("id", "handle", "name", "theme_json", "created_at")
+    .select(selectColumns)
     .where("is_featured", true)
     .orderBy("created_at", "desc")
-    .limit(8);
+    .limit(12);
 };
 
 module.exports = { findByHandle, listArtists, listFeaturedArtists };
