@@ -6,7 +6,25 @@ const isUuid = (value) => {
 
 const findByHandle = async (handle) => {
   const db = getDb();
-  const query = db("artists").select("id", "handle", "name", "theme_json");
+  const [
+    hasProfilePhotoUrl,
+    hasStatus,
+    hasStory,
+    hasBio,
+  ] = await Promise.all([
+    db.schema.hasColumn("artists", "profile_photo_url"),
+    db.schema.hasColumn("artists", "status"),
+    db.schema.hasColumn("artists", "story"),
+    db.schema.hasColumn("artists", "bio"),
+  ]);
+
+  const selectColumns = ["id", "handle", "name", "theme_json"];
+  if (hasProfilePhotoUrl) selectColumns.push("profile_photo_url");
+  if (hasStatus) selectColumns.push("status");
+  if (hasStory) selectColumns.push("story");
+  if (hasBio) selectColumns.push("bio");
+
+  const query = db("artists").select(selectColumns);
   if (isUuid(handle)) {
     query.where("id", handle);
   } else {

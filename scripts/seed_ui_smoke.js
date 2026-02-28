@@ -18,17 +18,21 @@ const DROP_HANDLE = "seed-drop";
 const VARIANT_SKU = "SEED-SKU-1";
 
 const QUIZ_JSON = {
+  title: "Smoke Drop Quiz",
   version: 1,
-  title: "Seed Drop Quiz",
   questions: [
     {
       id: "q1",
       type: "single_choice",
-      prompt: "Which size do you prefer?",
-      options: ["M", "L"],
-      correct: "M",
-      points: 10,
+      prompt: "Which shirt color do you want?",
+      options: ["Black", "White"],
       required: true,
+    },
+    {
+      id: "q2",
+      type: "text",
+      prompt: "Tell us your vibe",
+      required: false,
     },
   ],
 };
@@ -177,7 +181,7 @@ const ensureDrop = async (trx, { productId, artistId, adminUserId }) => {
   const hasFeaturedColumn = await trx.schema.hasColumn("drops", "is_featured");
   const existing = await trx("drops")
     .where({ handle: DROP_HANDLE })
-    .first("id", "handle");
+    .first("id", "handle", "quiz_json");
 
   const dropPayload = {
     title: "Seed Drop",
@@ -202,19 +206,36 @@ const ensureDrop = async (trx, { productId, artistId, adminUserId }) => {
         created_at: trx.fn.now(),
         ...dropPayload,
       })
-      .returning(["id", "handle"]);
+      .returning(["id", "handle", "quiz_json"]);
     drop = created;
   } else {
     const [updated] = await trx("drops")
       .where({ id: drop.id })
       .update(dropPayload)
-      .returning(["id", "handle"]);
+      .returning(["id", "handle", "quiz_json"]);
     drop = updated || drop;
+  }
+  if (!drop?.quiz_json) {
+    const [backfilled] = await trx("drops")
+      .where({ id: drop.id })
+      .whereNull("quiz_json")
+      .update({
+        quiz_json: QUIZ_JSON,
+        updated_at: trx.fn.now(),
+      })
+      .returning(["id", "handle", "quiz_json"]);
+    drop = backfilled || drop;
+  }
+  const verifiedDrop = await trx("drops")
+    .where({ id: drop.id })
+    .first("id", "handle", "status", "quiz_json");
+  if (!verifiedDrop?.quiz_json) {
+    throw new Error(`UI smoke seed failed: quiz_json is null for drop '${DROP_HANDLE}'`);
   }
 
   await trx("drop_products")
     .insert({
-      drop_id: drop.id,
+      drop_id: verifiedDrop.id,
       product_id: productId,
       sort_order: 0,
       created_at: trx.fn.now(),
@@ -223,7 +244,7 @@ const ensureDrop = async (trx, { productId, artistId, adminUserId }) => {
     .merge({ sort_order: 0 });
 
   const [{ total = 0 } = {}] = await trx("drop_products")
-    .where({ drop_id: drop.id })
+    .where({ drop_id: verifiedDrop.id })
     .countDistinct("product_id as total");
   if (Number(total) === 0) {
     const fallbackProduct = await trx("products")
@@ -232,7 +253,7 @@ const ensureDrop = async (trx, { productId, artistId, adminUserId }) => {
     if (fallbackProduct?.id) {
       await trx("drop_products")
         .insert({
-          drop_id: drop.id,
+          drop_id: verifiedDrop.id,
           product_id: fallbackProduct.id,
           sort_order: 0,
           created_at: trx.fn.now(),
@@ -242,7 +263,7 @@ const ensureDrop = async (trx, { productId, artistId, adminUserId }) => {
     }
   }
 
-  return drop;
+  return verifiedDrop;
 };
 
 const ensureOrder = async (trx, { buyerUserId, actorUserId, productId, variantId, priceCents }) => {

@@ -21,6 +21,8 @@ const leadsRouter = require("./src/modules/leads/lead.routes");
 const artistAccessRequestsRouter = require("./src/modules/artistAccessRequests/artistAccessRequests.routes");
 const artistAccessRequestsAdminRouter = require("./src/modules/artistAccessRequests/artistAccessRequests.admin.routes");
 const mediaAssetsRouter = require("./src/modules/mediaAssets/mediaAssets.routes");
+const homepageRouter = require("./src/modules/homepage/homepage.routes");
+const adminHomepageRouter = require("./src/modules/homepage/homepage.admin.routes");
 const devRoutesRouter = require("./routes/dev.routes");
 const { getDb } = require("./src/config/db");
 const { UPLOADS_DIR } = require("./src/config/paths");
@@ -260,6 +262,12 @@ app.use("/api/media-assets", mediaAssetsRouter);
 
 mountedRoutes.push("/api/admin/artist-access-requests");
 app.use("/api/admin/artist-access-requests", artistAccessRequestsAdminRouter);
+
+mountedRoutes.push("/api/homepage");
+app.use("/api/homepage", homepageRouter);
+
+mountedRoutes.push("/api/admin/homepage");
+app.use("/api/admin/homepage", adminHomepageRouter);
 
 if (DEV_ROUTES_ENABLED) {
   app.post("/api/dev/link-label-user", async (req, res) => {

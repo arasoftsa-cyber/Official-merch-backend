@@ -4,13 +4,30 @@ const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const NOT_FOUND = { error: "artist_not_found" };
 
-const formatArtist = (row) => {
+const toNullableString = (value) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const formatArtist = (row, coverPublicUrl = null) => {
   if (!row) return null;
-  const { id, handle, name, theme_json, profile_photo_url, status } = row;
+  const { id, handle, name, theme_json, profile_photo_url, status, story, bio } = row;
+
+  const storyFromTheme =
+    theme_json && typeof theme_json === "object"
+      ? toNullableString(theme_json.story) || toNullableString(theme_json.bio)
+      : null;
+  const normalizedStory = toNullableString(story) || toNullableString(bio) || storyFromTheme;
+  const normalizedCoverPublicUrl = toAbsolutePublicUrl(coverPublicUrl) || null;
+
   return {
     id,
-    handle,
-    name,
+    handle: handle || null,
+    name: name || null,
+    story: normalizedStory,
+    cover_public_url: normalizedCoverPublicUrl,
+    coverImageUrl: normalizedCoverPublicUrl,
     theme: theme_json,
     status: status ?? null,
     profile_photo_url: toAbsolutePublicUrl(profile_photo_url) || null,
@@ -64,9 +81,12 @@ const getArtist = async (req, res) => {
   if (!row) {
     return res.status(404).json(NOT_FOUND);
   }
+  const coverMap = await loadEntityMediaUrlMap("artist", [row.id], "cover");
+  const coverPublicUrl = coverMap.get(row.id) || null;
 
   return res.json({
-    artist: formatArtist(row),
+    artist: formatArtist(row, coverPublicUrl),
+    products: [],
     shelf: [],
   });
 };
@@ -110,6 +130,7 @@ const getShelf = async (req, res) => {
 
   return res.json({
     artistHandle: row.handle,
+    products: items,
     shelf: items,
     items,
   });
