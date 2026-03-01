@@ -88,12 +88,18 @@ router.get("/", async (req, res, next) => {
 
       const query = db("drops")
         .leftJoin("drop_products as dp", "dp.drop_id", "drops.id")
+        .leftJoin("entity_media_links as eml", function () {
+          this.on("eml.entity_id", "=", "drops.id")
+            .andOn("eml.entity_type", "=", db.raw("'drop'"))
+            .andOn("eml.role", "=", db.raw("'cover'"));
+        })
+        .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
         .select(
           "drops.id",
           "drops.handle",
           "drops.title",
           "drops.description",
-          "drops.hero_image_url",
+          "ma.public_url as hero_image_url",
           "drops.starts_at",
           "drops.ends_at",
           "drops.artist_id",
@@ -110,7 +116,7 @@ router.get("/", async (req, res, next) => {
           "drops.handle",
           "drops.title",
           "drops.description",
-          "drops.hero_image_url",
+          "ma.public_url",
           "drops.starts_at",
           "drops.ends_at",
           "drops.artist_id",
@@ -125,14 +131,10 @@ router.get("/", async (req, res, next) => {
         query.whereNot("drops.status", "archived");
       }
 
-      const rows = await query.orderBy("created_at", "desc").limit(100);
-      const coverMap = await loadCoverUrlMap(
-        "drop",
-        rows.map((row) => row.id)
-      );
+      const rows = await query.orderBy("drops.created_at", "desc").limit(100);
       return res.json({
         items: rows.map((row) => ({
-          ...formatDrop(row, coverMap.get(row.id) || null),
+          ...formatDrop(row),
           slug: row.handle,
           start_at: row.starts_at,
           end_at: row.ends_at,
@@ -155,58 +157,62 @@ router.get("/", async (req, res, next) => {
 
       const db = getDb();
       const rows = await db("drops")
+        .leftJoin("entity_media_links as eml", function () {
+          this.on("eml.entity_id", "=", "drops.id")
+            .andOn("eml.entity_type", "=", db.raw("'drop'"))
+            .andOn("eml.role", "=", db.raw("'cover'"));
+        })
+        .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
         .select(
-          "id",
-          "handle",
-          "title",
-          "description",
-          "hero_image_url",
-          "starts_at",
-          "ends_at",
-          "artist_id",
-          "label_id",
-          "status",
-          "created_by_user_id",
-          "created_at",
-          "updated_at"
+          "drops.id",
+          "drops.handle",
+          "drops.title",
+          "drops.description",
+          "ma.public_url as hero_image_url",
+          "drops.starts_at",
+          "drops.ends_at",
+          "drops.artist_id",
+          "drops.label_id",
+          "drops.status",
+          "drops.created_by_user_id",
+          "drops.created_at",
+          "drops.updated_at"
         )
-        .orderBy("updated_at", "desc")
+        .orderBy("drops.updated_at", "desc")
         .limit(200);
-      const coverMap = await loadCoverUrlMap(
-        "drop",
-        rows.map((row) => row.id)
-      );
       return res.json({
-        items: rows.map((row) => formatDrop(row, coverMap.get(row.id) || null)),
+        items: rows.map((row) => formatDrop(row)),
       });
     }
 
     const db = getDb();
     const rows = await db("drops")
+      .leftJoin("entity_media_links as eml", function () {
+        this.on("eml.entity_id", "=", "drops.id")
+          .andOn("eml.entity_type", "=", db.raw("'drop'"))
+          .andOn("eml.role", "=", db.raw("'cover'"));
+      })
+      .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
       .select(
-        "id",
-        "handle",
-        "title",
-        "description",
-        "hero_image_url",
-        "starts_at",
-        "ends_at",
-        "artist_id",
-        "label_id",
-        "status",
-        "created_by_user_id",
-        "created_at",
-        "updated_at"
+        "drops.id",
+        "drops.handle",
+        "drops.title",
+        "drops.description",
+        "ma.public_url as hero_image_url",
+        "drops.starts_at",
+        "drops.ends_at",
+        "drops.artist_id",
+        "drops.label_id",
+        "drops.status",
+        "drops.created_by_user_id",
+        "drops.created_at",
+        "drops.updated_at"
       )
-      .where({ status: "published" })
-      .orderBy("updated_at", "desc")
+      .where({ "drops.status": "published" })
+      .orderBy("drops.updated_at", "desc")
       .limit(50);
-    const coverMap = await loadCoverUrlMap(
-      "drop",
-      rows.map((row) => row.id)
-    );
     return res.json({
-      items: rows.map((row) => formatDrop(row, coverMap.get(row.id) || null)),
+      items: rows.map((row) => formatDrop(row)),
     });
   } catch (err) {
     next(err);
@@ -235,30 +241,32 @@ router.get("/featured", async (req, res, next) => {
   try {
     const db = getDb();
     const rows = await db("drops")
+      .leftJoin("entity_media_links as eml", function () {
+        this.on("eml.entity_id", "=", "drops.id")
+          .andOn("eml.entity_type", "=", db.raw("'drop'"))
+          .andOn("eml.role", "=", db.raw("'cover'"));
+      })
+      .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
       .select(
-        "id",
-        "handle",
-        "title",
-        "description",
-        "hero_image_url",
-        "starts_at",
-        "ends_at",
-        "artist_id",
-        "label_id",
-        "status",
-        "created_by_user_id",
-        "created_at",
-        "updated_at"
+        "drops.id",
+        "drops.handle",
+        "drops.title",
+        "drops.description",
+        "ma.public_url as hero_image_url",
+        "drops.starts_at",
+        "drops.ends_at",
+        "drops.artist_id",
+        "drops.label_id",
+        "drops.status",
+        "drops.created_by_user_id",
+        "drops.created_at",
+        "drops.updated_at"
       )
-      .where({ status: "published" })
-      .orderBy("updated_at", "desc")
+      .where({ "drops.status": "published" })
+      .orderBy("drops.updated_at", "desc")
       .limit(12);
-    const coverMap = await loadCoverUrlMap(
-      "drop",
-      rows.map((row) => row.id)
-    );
     res.json({
-      items: rows.map((row) => formatDrop(row, coverMap.get(row.id) || null)),
+      items: rows.map((row) => formatDrop(row)),
     });
   } catch (err) {
     next(err);
