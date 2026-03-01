@@ -466,15 +466,8 @@ router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) =
       updates.description = body.description == null ? null : String(body.description);
     }
 
-    if (
-      Object.prototype.hasOwnProperty.call(body, "hero_image_url") ||
-      Object.prototype.hasOwnProperty.call(body, "heroImageUrl")
-    ) {
-      const heroValue = Object.prototype.hasOwnProperty.call(body, "hero_image_url")
-        ? body.hero_image_url
-        : body.heroImageUrl;
-      updates.hero_image_url = heroValue == null ? null : String(heroValue).trim() || null;
-    }
+      // Removed: updates.hero_image_url = heroValue == null ? null : String(heroValue).trim() || null;
+      // This is now handled in the transaction below via entity_media_links.
 
     const parseTimestamp = (value) => {
       if (value == null || value === "") return null;
@@ -516,11 +509,72 @@ router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) =
       updates.quiz_json = body.quiz_json == null ? null : body.quiz_json;
     }
 
-    updates.updated_at = db.fn.now();
+    await db.transaction(async (trx) => {
+      if (Object.keys(updates).length > 0) {
+        await trx("drops").where({ id }).update(updates);
+      }
 
-    await db("drops").where({ id }).update(updates);
+      if (
+        Object.prototype.hasOwnProperty.call(body, "hero_image_url") ||
+        Object.prototype.hasOwnProperty.call(body, "heroImageUrl")
+      ) {
+        const heroValue = Object.prototype.hasOwnProperty.call(body, "hero_image_url")
+          ? body.hero_image_url
+          : body.heroImageUrl;
+        const heroUrl = heroValue == null ? "" : String(heroValue).trim();
+
+        if (!heroUrl) {
+          await trx("entity_media_links")
+            .where({
+              entity_type: "drop",
+              entity_id: id,
+              role: "cover",
+            })
+            .del();
+        } else {
+          let mediaAssetId;
+          const existingAsset = await trx("media_assets").where({ public_url: heroUrl }).first();
+          if (existingAsset) {
+            mediaAssetId = existingAsset.id;
+          } else {
+            mediaAssetId = randomUUID();
+            await trx("media_assets").insert({
+              id: mediaAssetId,
+              public_url: heroUrl,
+              created_at: trx.fn.now(),
+            });
+          }
+
+          const existingLink = await trx("entity_media_links")
+            .where({
+              entity_type: "drop",
+              entity_id: id,
+              role: "cover",
+            })
+            .first();
+
+          if (existingLink) {
+            await trx("entity_media_links").where({ id: existingLink.id }).update({
+              media_asset_id: mediaAssetId,
+            });
+          } else {
+            await trx("entity_media_links").insert({
+              id: randomUUID(),
+              media_asset_id: mediaAssetId,
+              entity_type: "drop",
+              entity_id: id,
+              role: "cover",
+              sort_order: 0,
+              created_at: trx.fn.now(),
+            });
+          }
+        }
+      }
+    });
+
+    const coverMap = await loadCoverUrlMap("drop", [id]);
     const updated = await db("drops").where({ id }).first();
-    return res.json({ drop: formatDrop(updated) });
+    return res.json({ drop: formatDrop(updated, coverMap.get(id)) });
   } catch (err) {
     next(err);
   }
@@ -536,7 +590,8 @@ router.get("/:handle", async (req, res, next) => {
     if (!drop) {
       return res.status(404).json(PUBLIC_NOT_FOUND);
     }
-    res.json({ drop: formatDrop(drop) });
+    const coverMap = await loadCoverUrlMap("drop", [drop.id]);
+    res.json({ drop: formatDrop(drop, coverMap.get(drop.id)) });
   } catch (err) {
     next(err);
   }
@@ -552,7 +607,8 @@ router.get("/id/:id", setDropIdAliasDeprecationHeaders, async (req, res, next) =
     if (!drop) {
       return res.status(404).json(PUBLIC_NOT_FOUND);
     }
-    res.json({ drop: formatDrop(drop) });
+    const coverMap = await loadCoverUrlMap("drop", [drop.id]);
+    res.json({ drop: formatDrop(drop, coverMap.get(drop.id)) });
   } catch (err) {
     next(err);
   }
@@ -647,26 +703,54 @@ router.post(
         uniqueHandle = `${normalizedHandle}-${suffix}`;
       }
 
-      const id = randomUUID();
-      const now = db.fn.now();
-      await db("drops").insert({
-        id,
-        handle: uniqueHandle,
-        title,
-        description: description || null,
-        hero_image_url: heroImageUrl || null,
-        status: "draft",
-        starts_at: startsAt || null,
-        ends_at: endsAt || null,
-        artist_id: resolvedArtistId,
-        label_id: resolvedLabelId,
-        created_by_user_id: req.user.id,
-        created_at: now,
-        updated_at: now,
-      });
+      await db.transaction(async (trx) => {
+        const id = randomUUID();
+        const now = trx.fn.now();
+        await trx("drops").insert({
+          id,
+          handle: uniqueHandle,
+          title,
+          description: description || null,
+          status: "draft",
+          starts_at: startsAt || null,
+          ends_at: endsAt || null,
+          artist_id: resolvedArtistId,
+          label_id: resolvedLabelId,
+          created_by_user_id: req.user.id,
+          created_at: now,
+          updated_at: now,
+        });
 
-      const drop = await db("drops").where({ id }).first();
-      res.status(201).json({ drop: formatDrop(drop) });
+        const heroUrl = (heroImageUrl || "").trim();
+        if (heroUrl) {
+          let mediaAssetId;
+          const existing = await trx("media_assets").where({ public_url: heroUrl }).first();
+          if (existing) {
+            mediaAssetId = existing.id;
+          } else {
+            mediaAssetId = randomUUID();
+            await trx("media_assets").insert({
+              id: mediaAssetId,
+              public_url: heroUrl,
+              created_at: now,
+            });
+          }
+
+          await trx("entity_media_links").insert({
+            id: randomUUID(),
+            media_asset_id: mediaAssetId,
+            entity_type: "drop",
+            entity_id: id,
+            role: "cover",
+            sort_order: 0,
+            created_at: now,
+          });
+        }
+
+        const drop = await trx("drops").where({ id }).first();
+        const coverUrl = heroUrl || null;
+        res.status(201).json({ drop: formatDrop(drop, coverUrl) });
+      });
     } catch (err) {
       next(err);
     }
@@ -680,8 +764,8 @@ const formatDrop = (row, coverUrl = null) => {
     handle: row.handle,
     title: row.title,
     description: row.description,
-    heroImageUrl: row.hero_image_url,
-    coverUrl,
+    heroImageUrl: coverUrl || row.hero_image_url || null,
+    coverUrl: coverUrl || row.hero_image_url || null,
     quiz_json: row.quiz_json || null,
     quizJson: row.quiz_json || null,
     status: row.status,

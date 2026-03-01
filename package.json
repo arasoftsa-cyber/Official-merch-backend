@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "migrate:latest": "knex migrate:latest",
+    "start": "node app.js",
     "migrate:rollback": "knex migrate:rollback",
     "migrate:make": "knex migrate:make",
     "backup": "node scripts/backup.js"
