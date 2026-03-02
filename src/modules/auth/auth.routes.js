@@ -2,48 +2,51 @@ const express = require("express");
 const router = express.Router();
 
 const rateLimit = require("../../core/http/rateLimit");
+const { ok } = require("../../core/http/errorResponse");
 const { requireAuth } = require("../../core/http/auth.middleware");
 const { requirePolicy } = require("../../core/http/policy.middleware");
-const { ping, login, partnerLogin, register } = require("./auth.controller");
+const { ping, login, partnerLogin, register, refresh, logout } = require("./auth.controller");
 
+const isProd = process.env.NODE_ENV === "production";
 const loginRateLimiter = rateLimit({
   windowMs: 60_000,
-  max: 5,
+  max: isProd ? 5 : 30,
   keyGenerator: (req) => req.ip,
 });
-const isProd = process.env.NODE_ENV === "production";
 
 router.get("/ping", ping);
 router.post(
   "/login",
   express.json(),
-  ...(isProd ? [loginRateLimiter] : []),
+  loginRateLimiter,
   login
 );
 router.post(
   "/partner/login",
   express.json(),
-  ...(isProd ? [loginRateLimiter] : []),
+  loginRateLimiter,
   partnerLogin
 );
 router.post("/register", express.json(), register);
+router.post("/refresh", express.json(), refresh);
+router.post("/logout", express.json(), logout);
 router.get(
   "/probe",
   requireAuth,
   requirePolicy("admin:probe", "system"),
   (req, res) => {
-    res.json({ ok: true, probe: true, user: req.user });
+    ok(res, { ok: true, probe: true, user: req.user });
   }
 );
 router.get("/whoami", requireAuth, (req, res) => {
-  res.json({ ok: true, user: req.user });
+  ok(res, { ok: true, user: req.user });
 });
 router.get(
   "/label-read",
   requireAuth,
   requirePolicy("label:artist:read", "system"),
   (req, res) => {
-    res.json({ ok: true, route: "label-read", user: req.user });
+    ok(res, { ok: true, route: "label-read", user: req.user });
   }
 );
 router.get(
@@ -51,7 +54,7 @@ router.get(
   requireAuth,
   requirePolicy("label:artist:write", "system"),
   (req, res) => {
-    res.json({ ok: true, route: "label-mutate", user: req.user });
+    ok(res, { ok: true, route: "label-mutate", user: req.user });
   }
 );
 

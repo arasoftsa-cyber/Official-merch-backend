@@ -1,8 +1,11 @@
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../../core/db/db");
 const { requireAuth } = require("../../core/http/auth.middleware");
 const { requirePolicy } = require("../../core/http/policy.middleware");
+const { ensureUploadDir } = require("../../core/config/uploadPaths");
 const {
   isUserLinkedToArtist,
   isLabelLinkedToArtist,
@@ -15,6 +18,14 @@ const NOT_FOUND = { error: "drop_not_found" };
 const PUBLIC_NOT_FOUND = { error: "not_found" };
 const PRODUCT_NOT_FOUND = { error: "product_not_found" };
 const DROP_REQUIRES_PRODUCTS = { error: "drop_requires_products" };
+const MAX_DROP_HERO_MULTIPART_BYTES = 6 * 1024 * 1024;
+const MAX_DROP_HERO_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_DROP_HERO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const DROP_HERO_EXT_BY_MIME = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+};
 
 const isArtistDropsScope = (req) => req.baseUrl?.includes("/artist/drops");
 const isAdminDropsScope = (req) => req.baseUrl?.includes("/admin/drops");
@@ -30,6 +41,123 @@ const setDropIdAliasDeprecationHeaders = (_req, res, next) => {
   res.setHeader("Sunset", "2026-04-15T00:00:00Z");
   res.setHeader("Link", "</api/drops/{handle}>; rel=\"alternate\"");
   next();
+};
+
+const parseContentDisposition = (line) => {
+  const nameMatch = line.match(/name="([^"]+)"/i);
+  const filenameMatch = line.match(/filename="([^"]*)"/i);
+  return {
+    name: nameMatch?.[1] || "",
+    filename: filenameMatch?.[1] || "",
+  };
+};
+
+const splitBufferBy = (buffer, delimiter) => {
+  const chunks = [];
+  let start = 0;
+  while (start <= buffer.length) {
+    const idx = buffer.indexOf(delimiter, start);
+    if (idx === -1) {
+      chunks.push(buffer.subarray(start));
+      break;
+    }
+    chunks.push(buffer.subarray(start, idx));
+    start = idx + delimiter.length;
+  }
+  return chunks;
+};
+
+const parseMultipartFormData = async (req) => {
+  const contentType = String(req.headers["content-type"] || "");
+  if (!contentType.toLowerCase().includes("multipart/form-data")) {
+    return null;
+  }
+
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
+  if (!boundary) {
+    return { fields: {}, file: null, parseError: "missing_boundary" };
+  }
+
+  const body = await new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > MAX_DROP_HERO_MULTIPART_BYTES) {
+        reject(new Error("payload_too_large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  }).catch((error) => ({ parseError: error.message }));
+
+  if (body?.parseError) {
+    return { fields: {}, file: null, parseError: body.parseError };
+  }
+
+  const delimiter = Buffer.from(`--${boundary}`);
+  const rawParts = splitBufferBy(body, delimiter);
+  const fields = {};
+  let file = null;
+
+  for (const rawPart of rawParts) {
+    if (!rawPart || rawPart.length === 0) continue;
+    let part = rawPart;
+    if (part.subarray(0, 2).toString() === "\r\n") {
+      part = part.subarray(2);
+    }
+    if (part.length === 0) continue;
+    if (part.subarray(0, 2).toString() === "--") continue;
+
+    const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
+    if (headerEnd < 0) continue;
+    const headerText = part.subarray(0, headerEnd).toString("utf8");
+    let content = part.subarray(headerEnd + 4);
+    if (content.subarray(content.length - 2).toString() === "\r\n") {
+      content = content.subarray(0, content.length - 2);
+    }
+
+    const dispositionLine = headerText
+      .split("\r\n")
+      .find((line) => /^content-disposition:/i.test(line));
+    if (!dispositionLine) continue;
+    const { name, filename } = parseContentDisposition(dispositionLine);
+    if (!name) continue;
+
+    const contentTypeLine = headerText
+      .split("\r\n")
+      .find((line) => /^content-type:/i.test(line));
+    const mimeType = contentTypeLine
+      ? contentTypeLine.split(":")[1]?.trim() || "application/octet-stream"
+      : "application/octet-stream";
+
+    if (filename) {
+      file = {
+        fieldname: name,
+        originalname: filename,
+        mimetype: mimeType.toLowerCase(),
+        buffer: content,
+      };
+      continue;
+    }
+
+    fields[name] = content.toString("utf8");
+  }
+
+  return { fields, file };
+};
+
+const saveDropHeroImage = async (file) => {
+  const ext = DROP_HERO_EXT_BY_MIME[file.mimetype] || "";
+  const filename = `${Date.now()}-${randomUUID()}${ext}`;
+  const destination = ensureUploadDir("media-assets", "drops");
+  const absolutePath = path.join(destination, filename);
+  await fs.promises.writeFile(absolutePath, file.buffer);
+  return `/uploads/media-assets/drops/${filename}`;
 };
 
 const loadCoverUrlMap = async (entityType, entityIds) => {
@@ -52,10 +180,11 @@ const loadCoverUrlMap = async (entityType, entityIds) => {
 
     const rows = await db("entity_media_links as eml")
       .join("media_assets as ma", "ma.id", "eml.media_asset_id")
-      .select("eml.entity_id as entityId", "ma.public_url as publicUrl")
+      .select("eml.entity_id as entityId", "ma.public_url as publicUrl", "eml.role")
       .where("eml.entity_type", entityType)
-      .andWhere("eml.role", "cover")
+      .whereIn("eml.role", ["hero", "cover"])
       .whereIn("eml.entity_id", dedupedIds)
+      .orderByRaw("case when eml.role = 'hero' then 0 when eml.role = 'cover' then 1 else 2 end")
       .orderBy("eml.sort_order", "asc")
       .orderBy("eml.created_at", "asc");
 
@@ -69,6 +198,91 @@ const loadCoverUrlMap = async (entityType, entityIds) => {
   } catch {
     return new Map();
   }
+};
+
+const syncDropHeroImageUrlColumn = async (trx, dropId, heroUrl) => {
+  const hasColumn = await trx.schema.hasColumn("drops", "hero_image_url");
+  if (!hasColumn) return;
+
+  await trx("drops").where({ id: dropId }).update({
+    hero_image_url: heroUrl || null,
+    updated_at: trx.fn.now(),
+  });
+};
+
+const upsertDropHeroMedia = async (trx, dropId, heroUrl) => {
+  const normalizedHeroUrl = String(heroUrl || "").trim();
+
+  if (!normalizedHeroUrl) {
+    await trx("entity_media_links")
+      .where({
+        entity_type: "drop",
+        entity_id: dropId,
+      })
+      .whereIn("role", ["hero", "cover"])
+      .del();
+    await syncDropHeroImageUrlColumn(trx, dropId, null);
+    return null;
+  }
+
+  let mediaAssetId;
+  const existingAsset = await trx("media_assets").where({ public_url: normalizedHeroUrl }).first();
+  if (existingAsset) {
+    mediaAssetId = existingAsset.id;
+  } else {
+    mediaAssetId = randomUUID();
+    await trx("media_assets").insert({
+      id: mediaAssetId,
+      public_url: normalizedHeroUrl,
+      created_at: trx.fn.now(),
+    });
+  }
+
+  await trx("entity_media_links")
+    .where({
+      entity_type: "drop",
+      entity_id: dropId,
+      role: "hero",
+    })
+    .del();
+
+  await trx("entity_media_links").insert({
+    id: randomUUID(),
+    media_asset_id: mediaAssetId,
+    entity_type: "drop",
+    entity_id: dropId,
+    role: "hero",
+    sort_order: 0,
+    created_at: trx.fn.now(),
+  });
+
+  const existingCoverLink = await trx("entity_media_links")
+    .where({
+      entity_type: "drop",
+      entity_id: dropId,
+      role: "cover",
+    })
+    .first();
+
+  if (existingCoverLink) {
+    await trx("entity_media_links").where({ id: existingCoverLink.id }).update({
+      media_asset_id: mediaAssetId,
+      sort_order: 0,
+    });
+  } else {
+    await trx("entity_media_links").insert({
+      id: randomUUID(),
+      media_asset_id: mediaAssetId,
+      entity_type: "drop",
+      entity_id: dropId,
+      role: "cover",
+      sort_order: 0,
+      created_at: trx.fn.now(),
+    });
+  }
+
+  await syncDropHeroImageUrlColumn(trx, dropId, normalizedHeroUrl);
+  return normalizedHeroUrl;
 };
 
 router.get("/", async (req, res, next) => {
@@ -132,9 +346,13 @@ router.get("/", async (req, res, next) => {
       }
 
       const rows = await query.orderBy("drops.created_at", "desc").limit(100);
+      const coverMap = await loadCoverUrlMap(
+        "drop",
+        rows.map((row) => row.id)
+      );
       return res.json({
         items: rows.map((row) => ({
-          ...formatDrop(row),
+          ...formatDrop(row, coverMap.get(row.id)),
           slug: row.handle,
           start_at: row.starts_at,
           end_at: row.ends_at,
@@ -180,8 +398,12 @@ router.get("/", async (req, res, next) => {
         )
         .orderBy("drops.updated_at", "desc")
         .limit(200);
+      const coverMap = await loadCoverUrlMap(
+        "drop",
+        rows.map((row) => row.id)
+      );
       return res.json({
-        items: rows.map((row) => formatDrop(row)),
+        items: rows.map((row) => formatDrop(row, coverMap.get(row.id))),
       });
     }
 
@@ -211,8 +433,12 @@ router.get("/", async (req, res, next) => {
       .where({ "drops.status": "published" })
       .orderBy("drops.updated_at", "desc")
       .limit(50);
+    const coverMap = await loadCoverUrlMap(
+      "drop",
+      rows.map((row) => row.id)
+    );
     return res.json({
-      items: rows.map((row) => formatDrop(row)),
+      items: rows.map((row) => formatDrop(row, coverMap.get(row.id))),
     });
   } catch (err) {
     next(err);
@@ -265,8 +491,12 @@ router.get("/featured", async (req, res, next) => {
       .where({ "drops.status": "published" })
       .orderBy("drops.updated_at", "desc")
       .limit(12);
+    const coverMap = await loadCoverUrlMap(
+      "drop",
+      rows.map((row) => row.id)
+    );
     res.json({
-      items: rows.map((row) => formatDrop(row)),
+      items: rows.map((row) => formatDrop(row, coverMap.get(row.id))),
     });
   } catch (err) {
     next(err);
@@ -421,6 +651,69 @@ router.put("/:id/products", requireAuth, async (req, res, next) => {
   }
 });
 
+router.post("/:id/hero-image", requireAuth, rejectLabelMutations, async (req, res, next) => {
+  try {
+    if (!isAdminDropsScope(req)) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (!req.user?.id) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    const dropId = String(req.params?.id || "").trim();
+    if (!isUuid(dropId)) {
+      return res.status(400).json(BAD_REQUEST);
+    }
+
+    const db = getDb();
+    const drop = await db("drops").select("id").where({ id: dropId }).first();
+    if (!drop) {
+      return res.status(404).json(NOT_FOUND);
+    }
+
+    const multipart = await parseMultipartFormData(req);
+    if (!multipart || multipart.parseError) {
+      return res.status(400).json({ error: "validation_error", field: "file" });
+    }
+
+    const upload = multipart.file;
+    if (!upload || !upload.buffer?.length) {
+      return res.status(400).json({ error: "validation_error", field: "file" });
+    }
+    if (upload.fieldname !== "file" && upload.fieldname !== "image") {
+      return res.status(400).json({ error: "validation_error", field: "file" });
+    }
+    if (upload.buffer.length > MAX_DROP_HERO_IMAGE_BYTES) {
+      return res.status(400).json({ error: "validation_error", field: "file" });
+    }
+    if (!ALLOWED_DROP_HERO_MIME_TYPES.has(upload.mimetype)) {
+      return res.status(400).json({ error: "validation_error", field: "file" });
+    }
+
+    const relativeUrl = await saveDropHeroImage(upload);
+
+    await db.transaction(async (trx) => {
+      await upsertDropHeroMedia(trx, dropId, relativeUrl);
+    });
+
+    const coverMap = await loadCoverUrlMap("drop", [dropId]);
+    const updatedDrop = await db("drops").where({ id: dropId }).first();
+    const heroImageUrl = coverMap.get(dropId) || relativeUrl;
+
+    return res.status(201).json({
+      ok: true,
+      public_url: relativeUrl,
+      heroImageUrl,
+      drop: formatDrop(updatedDrop, heroImageUrl),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) => {
   try {
     if (!isAdminDropsScope(req)) {
@@ -530,53 +823,7 @@ router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) =
           ? body.hero_image_url
           : body.heroImageUrl;
         const heroUrl = heroValue == null ? "" : String(heroValue).trim();
-
-        if (!heroUrl) {
-          await trx("entity_media_links")
-            .where({
-              entity_type: "drop",
-              entity_id: id,
-              role: "cover",
-            })
-            .del();
-        } else {
-          let mediaAssetId;
-          const existingAsset = await trx("media_assets").where({ public_url: heroUrl }).first();
-          if (existingAsset) {
-            mediaAssetId = existingAsset.id;
-          } else {
-            mediaAssetId = randomUUID();
-            await trx("media_assets").insert({
-              id: mediaAssetId,
-              public_url: heroUrl,
-              created_at: trx.fn.now(),
-            });
-          }
-
-          const existingLink = await trx("entity_media_links")
-            .where({
-              entity_type: "drop",
-              entity_id: id,
-              role: "cover",
-            })
-            .first();
-
-          if (existingLink) {
-            await trx("entity_media_links").where({ id: existingLink.id }).update({
-              media_asset_id: mediaAssetId,
-            });
-          } else {
-            await trx("entity_media_links").insert({
-              id: randomUUID(),
-              media_asset_id: mediaAssetId,
-              entity_type: "drop",
-              entity_id: id,
-              role: "cover",
-              sort_order: 0,
-              created_at: trx.fn.now(),
-            });
-          }
-        }
+        await upsertDropHeroMedia(trx, id, heroUrl);
       }
     });
 
@@ -731,28 +978,7 @@ router.post(
 
         const heroUrl = (heroImageUrl || "").trim();
         if (heroUrl) {
-          let mediaAssetId;
-          const existing = await trx("media_assets").where({ public_url: heroUrl }).first();
-          if (existing) {
-            mediaAssetId = existing.id;
-          } else {
-            mediaAssetId = randomUUID();
-            await trx("media_assets").insert({
-              id: mediaAssetId,
-              public_url: heroUrl,
-              created_at: now,
-            });
-          }
-
-          await trx("entity_media_links").insert({
-            id: randomUUID(),
-            media_asset_id: mediaAssetId,
-            entity_type: "drop",
-            entity_id: id,
-            role: "cover",
-            sort_order: 0,
-            created_at: now,
-          });
+          await upsertDropHeroMedia(trx, id, heroUrl);
         }
 
         const drop = await trx("drops").where({ id }).first();

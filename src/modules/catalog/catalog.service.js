@@ -2,10 +2,10 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../../core/db/db");
-const { UPLOADS_DIR } = require("../../core/config/paths");
+const { getUploadDir, ensureUploadDir } = require("../../core/config/uploadPaths");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
-const PRODUCT_UPLOAD_DIR = path.join(UPLOADS_DIR, "products");
+const PRODUCT_UPLOAD_DIR = getUploadDir("products");
 const ALLOWED_PRODUCT_COLORS = new Set([
   "black",
   "white",
@@ -445,7 +445,7 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
 };
 
 const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
-  fs.mkdirSync(PRODUCT_UPLOAD_DIR, { recursive: true });
+  ensureUploadDir("products");
   const urls = [];
 
   for (let index = 0; index < files.length; index += 1) {

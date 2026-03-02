@@ -2,7 +2,18 @@ const { randomUUID } = require("crypto");
 const { getDb } = require("../src/core/db/db");
 const { hashPassword } = require("../src/utils/password");
 
-const ADMIN_EMAIL = "admin@test.com";
+const requireEnv = (name) => {
+  const value = String(process.env[name] || "").trim();
+  if (!value) {
+    throw new Error(
+      `seed_smoke_drop_quiz requires environment variable ${name} to be set`
+    );
+  }
+  return value;
+};
+
+const SMOKE_ADMIN_EMAIL = requireEnv("SMOKE_ADMIN_EMAIL");
+const SMOKE_ADMIN_PASSWORD = requireEnv("SMOKE_ADMIN_PASSWORD");
 const SMOKE_ARTIST_HANDLE = "ui-smoke-featured-artist";
 const LEGACY_SMOKE_ARTIST_HANDLE = "smoke-artist";
 const SMOKE_ARTIST_NAME = "UI Smoke Featured Artist";
@@ -78,22 +89,16 @@ const resolveCreatedByUser = async (trx, options = {}) => {
   }
 
   const adminByEmail = await trx("users")
-    .whereRaw("lower(email) = ?", [ADMIN_EMAIL.toLowerCase()])
+    .whereRaw("lower(email) = ?", [SMOKE_ADMIN_EMAIL.toLowerCase()])
     .first("id", "email", "role");
   if (adminByEmail?.id) return adminByEmail;
-
-  const anyAdmin = await trx("users").where({ role: "admin" }).orderBy("created_at", "asc").first("id", "email", "role");
-  if (anyAdmin?.id) return anyAdmin;
-
-  const firstUser = await trx("users").orderBy("created_at", "asc").first("id", "email", "role");
-  if (firstUser?.id) return firstUser;
 
   const [createdAdmin] = await trx("users")
     .insert({
       id: randomUUID(),
-      email: ADMIN_EMAIL,
+      email: SMOKE_ADMIN_EMAIL,
       role: "admin",
-      password_hash: await hashPassword(String(process.env.ADMIN_PASSWORD || "admin123")),
+      password_hash: await hashPassword(SMOKE_ADMIN_PASSWORD),
       created_at: trx.fn.now(),
     })
     .returning(["id", "email", "role"]);

@@ -1,20 +1,55 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
+const { z } = require("zod");
 const { getDb } = require("../../core/db/db");
 const { requireAuth } = require("../../core/http/auth.middleware");
+const { ok, fail } = require("../../core/http/errorResponse");
 const rateLimit = require("../../core/http/rateLimit");
 const { orderSpamGuard } = require("../../core/http/spamDetection");
 const { startPaymentForOrder, confirmAttempt } = require("../payments/payments.api");
 
 const router = express.Router();
 
-const BAD_REQUEST = { error: "invalid_request" };
-const PRODUCT_NOT_FOUND = { error: "product_not_found" };
-const OUT_OF_STOCK = { error: "out_of_stock" };
-const FORBIDDEN = { error: "forbidden" };
-const ORDER_NOT_FOUND = { error: "order_not_found" };
-const ORDER_NOT_CANCELLABLE = { error: "order_not_cancellable" };
-const ORDER_NOT_PAYABLE = { error: "order_not_payable" };
+const PRODUCT_NOT_FOUND = "product_not_found";
+const OUT_OF_STOCK = "out_of_stock";
+const FORBIDDEN = "forbidden";
+const ORDER_NOT_FOUND = "order_not_found";
+const ORDER_NOT_PAYABLE = "order_not_payable";
+const VALIDATION_ERROR = "validation_error";
+const ORDER_ALREADY_CANCELLED = "order_already_cancelled";
+const ORDER_NOT_CANCELLABLE = "order_not_cancellable";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const orderLineSchema = z.object({
+  productId: z.string().trim().regex(UUID_RE, "productId must be a valid UUID"),
+  productVariantId: z
+    .string()
+    .trim()
+    .regex(UUID_RE, "productVariantId must be a valid UUID"),
+  quantity: z.coerce
+    .number()
+    .int("quantity must be an integer")
+    .min(1, "quantity must be at least 1")
+    .max(10, "quantity must be at most 10"),
+});
+const orderItemsSchema = z
+  .array(orderLineSchema)
+  .min(1, "items must contain at least one item")
+  .max(50, "items cannot exceed 50 items");
+
+const parseOrderItems = (body) => {
+  if (Array.isArray(body?.items)) {
+    return orderItemsSchema.parse(body.items);
+  }
+
+  return orderItemsSchema.parse([
+    {
+      productId: body?.productId,
+      productVariantId: body?.productVariantId,
+      quantity: body?.quantity,
+    },
+  ]);
+};
 
 const orderCreateLimiter = rateLimit({
   windowMs: 60_000,
@@ -69,7 +104,7 @@ const isBuyer = (user) => BUYER_ROLES.has(getRole(user));
 
 const rejectIfNotBuyer = (req, res) => {
   if (!isBuyer(req.user)) {
-    res.status(403).json(FORBIDDEN);
+    fail(res, 403, FORBIDDEN, "Forbidden");
     return false;
   }
   return true;
@@ -131,7 +166,7 @@ const listOrdersHandler = async (req, res, next) => {
       return acc;
     }, {});
 
-    res.json({
+    ok(res, {
       items: orders.map((order) => ({
         id: order.id,
         status: order.status,
@@ -157,10 +192,10 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     const db = getDb();
     const order = await db("orders").where({ id: req.params.id }).first();
     if (!order) {
-      return res.status(404).json(ORDER_NOT_FOUND);
+      return fail(res, 404, ORDER_NOT_FOUND, "Order not found");
     }
     if (order.buyer_user_id !== req.user.id) {
-      return res.status(403).json(FORBIDDEN);
+      return fail(res, 403, FORBIDDEN, "Forbidden");
     }
     const items = await db("order_items").where({ order_id: order.id }).select();
     const paymentRow = await db("payments")
@@ -171,7 +206,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     const payment = paymentRow
       ? { status: paymentRow.status, attemptId: paymentRow.id }
       : { status: "unpaid", attemptId: null };
-    res.json({
+    ok(res, {
       id: order.id,
       status: order.status,
       totalCents: order.total_cents,
@@ -190,15 +225,15 @@ router.get("/:id/events", requireAuth, async (req, res, next) => {
     const db = getDb();
     const order = await db("orders").where({ id: req.params.id }).first();
     if (!order) {
-      return res.status(404).json(ORDER_NOT_FOUND);
+      return fail(res, 404, ORDER_NOT_FOUND, "Order not found");
     }
     if (order.buyer_user_id !== req.user.id) {
-      return res.status(403).json(FORBIDDEN);
+      return fail(res, 403, FORBIDDEN, "Forbidden");
     }
     const events = await db("order_events")
       .where({ order_id: order.id })
       .orderBy("created_at", "asc");
-    res.json({
+    ok(res, {
       items: events.map(formatEvent),
     });
   } catch (err) {
@@ -223,10 +258,10 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
       }
     }
     if (!order) {
-      return res.status(404).json(ORDER_NOT_FOUND);
+      return fail(res, 404, ORDER_NOT_FOUND, "Order not found");
     }
     if (order.buyer_user_id !== req.user.id) {
-      return res.status(403).json(FORBIDDEN);
+      return fail(res, 403, FORBIDDEN, "Forbidden");
     }
     const items = await db("order_items")
       .where({ order_id: orderId })
@@ -240,11 +275,11 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
       );
 
     if (order.status === "cancelled") {
-      return res.status(400).json({ error: "order_already_cancelled" });
+      return fail(res, 400, ORDER_ALREADY_CANCELLED, "Order is already cancelled");
     }
 
     if (order.status !== "placed" && order.status !== "unpaid") {
-      return res.status(400).json({ error: "order_not_cancellable" });
+      return fail(res, 400, ORDER_NOT_CANCELLABLE, "Order is not cancellable");
     }
 
     const canceled = await db.transaction(async (trx) => {
@@ -280,7 +315,7 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
       return { order: updatedOrder, items };
     });
 
-    res.json({
+    ok(res, {
       id: canceled.order.id,
       status: canceled.order.status,
       totalCents: canceled.order.total_cents,
@@ -304,7 +339,7 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
     const confirmPath = paymentId
       ? `/api/payments/mock/confirm/${paymentId}`
       : null;
-    return res.json({
+    return ok(res, {
       ok: true,
       paymentId,
       status: result.status,
@@ -314,10 +349,10 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
     });
   } catch (error) {
     if (error.code === "ORDER_NOT_FOUND") {
-      return res.status(404).json(ORDER_NOT_FOUND);
+      return fail(res, 404, ORDER_NOT_FOUND, "Order not found");
     }
     if (error.code === "ORDER_NOT_PAYABLE") {
-      return res.status(400).json(ORDER_NOT_PAYABLE);
+      return fail(res, 400, ORDER_NOT_PAYABLE, "Order is not payable");
     }
     next(error);
   }
@@ -332,7 +367,7 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
     orderSpamGuard,
     async (req, res, next) => {
       if (!isBuyer(req.user)) {
-        return res.status(403).json(FORBIDDEN);
+        return fail(res, 403, FORBIDDEN, "Forbidden");
       }
       console.log(
         "[DBG orders POST]",
@@ -346,50 +381,64 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
       );
       try {
         if (!rejectIfNotBuyer(req, res)) return;
-        const { items: rawItems, productId, productVariantId, quantity } = req.body || {};
-        const candidates =
-          Array.isArray(rawItems) && rawItems.length
-            ? rawItems
-            : [{ productId, productVariantId, quantity }];
-        const normalized = candidates
-          .map((line) => ({
-            productId: line?.productId,
-            productVariantId: line?.productVariantId,
-            quantity: Number(line?.quantity),
-          }))
-          .filter(
-            (line) =>
-              line.productId &&
-              line.productVariantId &&
-              Number.isFinite(line.quantity)
-          );
-        if (!normalized.length || normalized.some((line) => line.quantity <= 0)) {
-          return res.status(400).json(BAD_REQUEST);
+        let normalized;
+        try {
+          normalized = parseOrderItems(req.body || {});
+        } catch (validationErr) {
+          if (validationErr instanceof z.ZodError) {
+            return fail(res, 400, VALIDATION_ERROR, "Invalid order payload.", {
+              details: validationErr.issues.map((issue) => ({
+                path: issue.path.join("."),
+                message: issue.message,
+              })),
+            });
+          }
+          throw validationErr;
         }
 
         const db = getDb();
         const order = await db.transaction(async (trx) => {
           const now = trx.fn.now();
+          const supportsReturning = (trx.client?.config?.client || "").includes("pg");
           let totalCents = 0;
           const details = [];
           for (const line of normalized) {
-            const variant = await trx("product_variants")
+            const baseStockUpdate = trx("product_variants")
               .where({
                 id: line.productVariantId,
                 product_id: line.productId,
               })
-              .forUpdate()
-              .first();
-            if (!variant) {
-              const err = new Error("product_not_found");
-              err.code = "PRODUCT_NOT_FOUND";
-              throw err;
+              .andWhere("stock", ">=", line.quantity);
+
+            let variant;
+            if (supportsReturning) {
+              const updatedRows = await baseStockUpdate
+                .clone()
+                .update({
+                  stock: trx.raw("stock - ?", [line.quantity]),
+                })
+                .returning("*");
+              variant = updatedRows[0];
+            } else {
+              const updatedCount = await baseStockUpdate.update({
+                stock: trx.raw("stock - ?", [line.quantity]),
+              });
+              if (Number(updatedCount) > 0) {
+                variant = await trx("product_variants")
+                  .where({
+                    id: line.productVariantId,
+                    product_id: line.productId,
+                  })
+                  .first();
+              }
             }
-            if (variant.stock < line.quantity) {
+
+            if (!variant) {
               const err = new Error("out_of_stock");
               err.code = "OUT_OF_STOCK";
               throw err;
             }
+
             totalCents += variant.price_cents * line.quantity;
             details.push({ line, variant });
           }
@@ -415,10 +464,6 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
             .ignore();
 
           for (const detail of details) {
-            await trx("product_variants")
-              .where({ id: detail.variant.id })
-              .update({ stock: detail.variant.stock - detail.line.quantity });
-
             await trx("order_items").insert({
               id: randomUUID(),
               order_id: orderId,
@@ -440,16 +485,16 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
         });
 
         const items = await db("order_items").where({ order_id: order.id }).select();
-        res.json({
+        ok(res, {
           order: formatOrder(order),
           items: items.map(formatItem),
         });
       } catch (err) {
         if (err?.code === "PRODUCT_NOT_FOUND") {
-          return res.status(404).json(PRODUCT_NOT_FOUND);
+          return fail(res, 404, PRODUCT_NOT_FOUND, "Product not found");
         }
         if (err?.code === "OUT_OF_STOCK") {
-          return res.status(400).json(OUT_OF_STOCK);
+          return fail(res, 400, OUT_OF_STOCK, "Out of stock");
         }
         next(err);
       }

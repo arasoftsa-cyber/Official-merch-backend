@@ -12,6 +12,14 @@ const createDb = () => {
     dbInstance = knex({
       client: "pg",
       connection: env.DATABASE_URL,
+      pool: {
+        min: 2,
+        max: 10,
+        acquireTimeoutMillis: 10000,
+        createTimeoutMillis: 10000,
+        destroyTimeoutMillis: 5000,
+        idleTimeoutMillis: 30000,
+      },
     });
   }
 

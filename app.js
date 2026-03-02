@@ -1,5 +1,6 @@
 require('module-alias/register');
 const express = require("express");
+const helmet = require("helmet");
 let cors;
 try {
   cors = require("cors");
@@ -27,14 +28,18 @@ const adminHomepageRouter = require("./src/modules/homepage/homepage.admin.route
 const devRoutesRouter = require("./routes/dev.routes");
 const { getDb } = require("./src/core/db/db");
 const { UPLOADS_DIR } = require("./src/core/config/paths");
+const { getUploadRoot, getUploadDir, ensureUploadDir } = require("./src/core/config/uploadPaths");
 const { logRequest } = require("./src/core/http/logger");
 const { attachAuthUser } = require("./src/core/http/auth.middleware");
+const { ok, fail } = require("./src/core/http/errorResponse");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BUILD_ID = process.env.BUILD_ID || new Date().toISOString();
+const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
 const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
+const devRoutesEnabledEnv = String(process.env.DEV_ROUTES_ENABLED || "").toLowerCase();
 const smokeSeedEnv = String(process.env.SMOKE_SEED || "").toLowerCase();
 const smokeSeedEnabledEnv = String(process.env.SMOKE_SEED_ENABLED || "").toLowerCase();
 const ciSmokeEnv = String(process.env.CI_SMOKE || "").toLowerCase();
@@ -46,7 +51,12 @@ const SMOKE_SEED_ENABLED =
     smokeSeedEnabledEnv === "true" ||
     ciSmokeEnv === "1" ||
     ciSmokeEnv === "true");
-const DEV_ROUTES_ENABLED = SMOKE_SEED_ENABLED || nodeEnv === "test";
+const hasExplicitDevRoutesFlag =
+  devRoutesEnabledEnv === "1" ||
+  devRoutesEnabledEnv === "true" ||
+  smokeSeedEnabledEnv === "1" ||
+  smokeSeedEnabledEnv === "true";
+const DEV_ROUTES_ENABLED = !isProduction && hasExplicitDevRoutesFlag;
 console.log("### BACKEND BUILD ID ###", BUILD_ID, "pid=", process.pid);
 console.log("BUILD_ID Value:", BUILD_ID);
 console.log("SMOKE_SEED_ENABLED", SMOKE_SEED_ENABLED);
@@ -70,20 +80,43 @@ const legacyLabelPrefixWarning = (req, _res, next) => {
   next();
 };
 
-const allowedOrigins = new Set([
+const configuredCorsOrigins = String(process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const defaultDevOrigins = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
-  process.env.CLIENT_URL,
-].filter(Boolean));
+  "http://localhost:5174",
+  "http://127.0.0.1:5174",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+  "http://localhost:4174",
+  "http://127.0.0.1:4174",
+];
+
+const allowDevLocalhostDefaults = !isProduction && configuredCorsOrigins.length === 0;
+
+const allowedOrigins = new Set(
+  [
+    process.env.CLIENT_URL,
+    ...configuredCorsOrigins,
+    ...(allowDevLocalhostDefaults ? defaultDevOrigins : []),
+  ].filter(Boolean)
+);
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return true;
+  return allowedOrigins.has(origin);
+};
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.has(origin)) {
+    if (isOriginAllowed(origin)) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error("Not allowed by CORS"));
     }
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -91,10 +124,19 @@ const corsOptions = {
   credentials: true,
 };
 
-app.use(express.json());
-app.use(cors({ origin: true, credentials: true }));
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(express.json({ limit: BODY_SIZE_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
+if (cors) {
+  app.use(cors(corsOptions));
+}
 app.use("/uploads", express.static(UPLOADS_DIR));
 console.log("[static] uploads served from", UPLOADS_DIR);
+ensureUploadDir("products");
+if (!isProduction) {
+  console.log("[uploads] root:", getUploadRoot());
+  console.log("[uploads] products:", getUploadDir("products"));
+}
 app.use(attachAuthUser);
 app.use(logRequest);
 
@@ -238,6 +280,16 @@ mountedRoutes.push("/api/artist/drops");
 app.use("/api/artist/drops", dropsRouter);
 mountedRoutes.push("/api/admin/drops");
 app.use("/api/admin/drops", dropsRouter);
+mountedRoutes.push("/api/partner/admin/drops (alias)");
+app.use(
+  "/api/partner/admin/drops",
+  aliasDeprecationHeaders({
+    sunset: "2026-04-16T00:00:00.000Z",
+    link: "/api/admin/drops",
+  }),
+  deprecateMiddleware("/api/partner/admin/drops -> /api/admin/drops"),
+  dropsRouter
+);
 
 mountedRoutes.push("/api/orders");
 app.use("/api/orders", ordersRouter);
@@ -271,90 +323,41 @@ mountedRoutes.push("/api/admin/homepage");
 app.use("/api/admin/homepage", adminHomepageRouter);
 
 if (DEV_ROUTES_ENABLED) {
-  app.post("/api/dev/link-label-user", async (req, res) => {
-    try {
-      const body = req.body || {};
-      const userIdRaw = typeof body.userId === "string" ? body.userId.trim() : "";
-      const emailRaw =
-        typeof body.email === "string"
-          ? body.email.trim().toLowerCase()
-          : typeof body.userEmail === "string"
-          ? body.userEmail.trim().toLowerCase()
-          : "";
-      const labelIdRaw = typeof body.labelId === "string" ? body.labelId.trim() : "";
-      const labelHandleRaw =
-        typeof body.labelHandle === "string"
-          ? body.labelHandle.trim().toLowerCase()
-          : typeof body.handle === "string"
-          ? body.handle.trim().toLowerCase()
-          : "";
-
-      // Smoke route probe should never 404; allow empty payload to return OK.
-      if ((!userIdRaw && !emailRaw) && (!labelIdRaw && !labelHandleRaw)) {
-        return res.status(200).json({ ok: true });
-      }
-
-      const db = getDb();
-      const resolvedUserId =
-        userIdRaw ||
-        (
-          await db("users")
-            .whereRaw("lower(email) = ?", [emailRaw])
-            .first("id")
-        )?.id;
-      if (!resolvedUserId) {
-        return res.status(200).json({ ok: true });
-      }
-
-      const resolvedLabelId =
-        labelIdRaw ||
-        (
-          await db("labels")
-            .whereRaw("lower(handle) = ?", [labelHandleRaw])
-            .first("id")
-        )?.id;
-      if (!resolvedLabelId) {
-        return res.status(200).json({ ok: true });
-      }
-
-      await db("label_users_map")
-        .insert({
-          user_id: resolvedUserId,
-          label_id: resolvedLabelId,
-          created_at: db.fn.now(),
-        })
-        .onConflict("user_id")
-        .merge({ label_id: resolvedLabelId });
-
-      return res.status(200).json({ ok: true, userId: resolvedUserId, labelId: resolvedLabelId });
-    } catch (err) {
-      return res.status(200).json({ ok: true });
+  const requireDevAdmin = (req, res, next) => {
+    if (!req.user) {
+      return fail(res, 401, "unauthorized", "Authentication required");
     }
-  });
+    if (req.user.role !== "admin") {
+      return fail(res, 403, "forbidden", "Admin access required");
+    }
+    return next();
+  };
 
   mountedRoutes.push('/api/dev');
-  app.use('/api/dev', devRoutesRouter);
+  app.use('/api/dev', requireDevAdmin, devRoutesRouter);
   console.log("DEV_ROUTES_MOUNTED /api/dev", {
     nodeEnv: process.env.NODE_ENV,
+    enabled: DEV_ROUTES_ENABLED,
     smoke: SMOKE_SEED_ENABLED,
+    explicitFlag: hasExplicitDevRoutesFlag,
+  });
+
+  app.get("/api/dev/_routes", requireDevAdmin, (req, res) => {
+    const stack = app?._router?.stack || app?.router?.stack || [];
+    const routes = collectRoutes(stack);
+    const devRoutes = collectRouterDirectRoutes(devRoutesRouter);
+    const key = (row) => `${row.method}:${row.path}`;
+    const seen = new Set(routes.map(key));
+    for (const row of devRoutes) {
+      const routeKey = key(row);
+      if (!seen.has(routeKey)) {
+        seen.add(routeKey);
+        routes.push(row);
+      }
+    }
+    return ok(res, routes);
   });
 }
-
-app.get("/api/dev/_routes", (req, res) => {
-  const stack = app?._router?.stack || app?.router?.stack || [];
-  const routes = collectRoutes(stack);
-  const devRoutes = DEV_ROUTES_ENABLED ? collectRouterDirectRoutes(devRoutesRouter) : [];
-  const key = (row) => `${row.method}:${row.path}`;
-  const seen = new Set(routes.map(key));
-  for (const row of devRoutes) {
-    const routeKey = key(row);
-    if (!seen.has(routeKey)) {
-      seen.add(routeKey);
-      routes.push(row);
-    }
-  }
-  return res.json(routes);
-});
 
 app.get("/api/_meta/dashboards", (req, res) => {
   res.json({
@@ -522,17 +525,43 @@ app.use(
   adminLeadsRouter
 );
 
+app.get("/health", async (_req, res) => {
+  let timeoutId = null;
+  try {
+    const db = getDb();
+    const dbProbe = db.raw("select 1");
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error("db_health_timeout")), 1500);
+    });
+    await Promise.race([dbProbe, timeout]);
+    return res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      db: "ok",
+    });
+  } catch (_err) {
+    return res.status(503).json({
+      ok: false,
+      buildId: BUILD_ID,
+      db: "fail",
+    });
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+});
+
 app.use((err, req, res, next) => {
+  void next;
   const status = res.statusCode && res.statusCode >= 400 ? res.statusCode : 500;
-  res.status(status);
   console.error(
     `[${req.method}] ${req.originalUrl} -> ${status}`,
     err.stack || err
   );
-  res.json({
-    error: "internal_server_error",
-    message: err?.message || "An unexpected error occurred",
-  });
+  const message =
+    process.env.NODE_ENV === "production"
+      ? "An unexpected error occurred"
+      : err?.message || "An unexpected error occurred";
+  return fail(res, status, "internal_server_error", message);
 });
 
 process.on("unhandledRejection", (reason) => {

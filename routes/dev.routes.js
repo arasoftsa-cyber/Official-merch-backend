@@ -1,5 +1,6 @@
 const { randomUUID } = require("crypto");
 const { getDb } = require("../src/core/db/db");
+const { ok, fail } = require("../src/core/http/errorResponse");
 const { seedUiSmoke } = require("../scripts/seed_ui_smoke");
 
 const router = require("express").Router();
@@ -8,7 +9,7 @@ const isDevMode = process.env.NODE_ENV !== "production";
 
 router.post("/seed-artist-access-lead", async (req, res, next) => {
   if (!isDevMode) {
-    return res.status(404).json({ ok: false, error: "not_found" });
+    return fail(res, 404, "not_found", "Development routes are disabled", { ok: false });
   }
 
   try {
@@ -40,7 +41,7 @@ router.post("/seed-artist-access-lead", async (req, res, next) => {
 
 router.post("/seed-artist-access-request", async (req, res, next) => {
   if (!isDevMode) {
-    return res.status(404).json({ ok: false, error: "not_found" });
+    return fail(res, 404, "not_found", "Development routes are disabled", { ok: false });
   }
 
   const {
@@ -87,7 +88,7 @@ router.post("/seed-artist-access-request", async (req, res, next) => {
 router.post("/link-label-user", async (req, res, next) => {
   console.log("[dev.link-label-user] HIT", { file: __filename, body: req.body });
   if (!isDevMode) {
-    return res.status(404).json({ ok: false, error: "not_found" });
+    return fail(res, 404, "not_found", "Development routes are disabled");
   }
 
   try {
@@ -108,10 +109,12 @@ router.post("/link-label-user", async (req, res, next) => {
         : "";
 
     if ((!userId && !emailRaw) || (!labelId && !labelHandle)) {
-      return res.status(400).json({
-        error: "missing_parameters",
-        message: "userId/email and labelId/labelHandle are required",
-      });
+      return fail(
+        res,
+        400,
+        "missing_parameters",
+        "userId/email and labelId/labelHandle are required"
+      );
     }
 
     const db = getDb();
@@ -123,7 +126,7 @@ router.post("/link-label-user", async (req, res, next) => {
           .first("id")
       )?.id;
     if (!resolvedUserId) {
-      return res.status(400).json({ error: "user_not_found" });
+      return fail(res, 404, "user_not_found", "User not found");
     }
 
     const resolvedLabelId =
@@ -134,7 +137,7 @@ router.post("/link-label-user", async (req, res, next) => {
           .first("id")
       )?.id;
     if (!resolvedLabelId) {
-      return res.status(400).json({ error: "label_not_found" });
+      return fail(res, 404, "label_not_found", "Label not found");
     }
 
     // Repo schema has a unique constraint on user_id in label_users_map.
@@ -147,15 +150,20 @@ router.post("/link-label-user", async (req, res, next) => {
       .onConflict("user_id")
       .merge({ label_id: resolvedLabelId });
 
-    return res.json({ ok: true, userId: resolvedUserId, labelId: resolvedLabelId });
+    return ok(res, { ok: true, userId: resolvedUserId, labelId: resolvedLabelId });
   } catch (err) {
-    return res.status(500).json({ error: "dev_link_label_user_failed" });
+    return fail(
+      res,
+      500,
+      "dev_link_label_user_failed",
+      err?.message || "Failed to link label user"
+    );
   }
 });
 
 router.get("/list-artist-access-leads", async (req, res, next) => {
   if (!isDevMode) {
-    return res.status(404).json({ ok: false, error: "not_found" });
+    return fail(res, 404, "not_found", "Development routes are disabled", { ok: false });
   }
 
   try {
@@ -175,7 +183,7 @@ router.get("/list-artist-access-leads", async (req, res, next) => {
         "created_at"
       );
 
-    return res.json({ ok: true, count: rows.length, items: rows });
+    return ok(res, { ok: true, count: rows.length, items: rows });
   } catch (err) {
     next(err);
   }
@@ -183,7 +191,7 @@ router.get("/list-artist-access-leads", async (req, res, next) => {
 
 router.post("/seed-ui-smoke-product", async (req, res, next) => {
   if (!isDevMode) {
-    return res.status(404).json({ ok: false, error: "not_found" });
+    return fail(res, 404, "not_found", "Development routes are disabled", { ok: false });
   }
 
   const PRODUCT_TITLE = "UI Smoke Purchasable Product";
@@ -273,7 +281,7 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
     console.log(
       `[ui-smoke-seed] productId=${result.product.id} sku=${result.variant.sku}`
     );
-    return res.json({
+    return ok(res, {
       ok: true,
       productId: result.product.id,
       sku: result.variant.sku,
@@ -288,7 +296,7 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
 router.post('/seed-ui-smoke', async (req, res, next) => {
   try {
     await seedUiSmoke({ env: process.env });
-    return res.json({ ok: true });
+    return ok(res, { ok: true });
   } catch (err) {
     next(err);
   }

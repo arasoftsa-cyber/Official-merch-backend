@@ -2,23 +2,70 @@ const { randomUUID } = require("crypto");
 const { getDb } = require("../src/core/db/db");
 const { hashPassword } = require("../src/utils/password");
 
-const ADMIN_EMAIL = "admin@test.com";
-const ARTIST_USER_ID = "00000000-0000-0000-0000-000000000003";
-const LABEL_USER_ID = "00000000-0000-0000-0000-000000000004";
-const ARTIST_EMAIL = "artist@test.com";
-const LABEL_EMAIL = "label@test.com";
-const ARTIST_HANDLE = "ui-smoke-featured-artist";
-const ARTIST_NAME = "UI Smoke Featured Artist";
-const LABEL_HANDLE = "ui-smoke-label";
-const LABEL_NAME = "UI Smoke Label";
-const PRODUCT_TITLE = "UI Smoke Featured Product";
-const PRODUCT_DESCRIPTION = "Deterministic product for UI smoke flows";
-const VARIANT_SKU = "UI-SMOKE-FEATURED-SKU-1";
+const loadSeedConfig = () => {
+  const jsonRaw = String(process.env.SMOKE_SEED_USERS_JSON || "").trim();
+  let json = {};
+  if (jsonRaw) {
+    try {
+      json = JSON.parse(jsonRaw);
+    } catch (error) {
+      throw new Error("SMOKE_SEED_USERS_JSON must be valid JSON");
+    }
+  }
 
-const resolvePassword = (envName, fallback) => {
-  const value = String(process.env[envName] || "").trim();
-  return value || fallback;
+  const pick = (jsonKey, envName) => {
+    const fromJson = json[jsonKey];
+    if (fromJson !== undefined && fromJson !== null && String(fromJson).trim() !== "") {
+      return String(fromJson).trim();
+    }
+    return String(process.env[envName] || "").trim();
+  };
+
+  const cfg = {
+    adminEmail: pick("adminEmail", "SMOKE_ADMIN_EMAIL"),
+    artistUserId: pick("artistUserId", "SMOKE_ARTIST_USER_ID"),
+    labelUserId: pick("labelUserId", "SMOKE_LABEL_USER_ID"),
+    artistEmail: pick("artistEmail", "SMOKE_ARTIST_EMAIL"),
+    labelEmail: pick("labelEmail", "SMOKE_LABEL_EMAIL"),
+    artistPassword: pick("artistPassword", "SMOKE_ARTIST_PASSWORD"),
+    labelPassword: pick("labelPassword", "SMOKE_LABEL_PASSWORD"),
+    artistHandle: pick("artistHandle", "SMOKE_ARTIST_HANDLE"),
+    artistName: pick("artistName", "SMOKE_ARTIST_NAME"),
+    labelHandle: pick("labelHandle", "SMOKE_LABEL_HANDLE"),
+    labelName: pick("labelName", "SMOKE_LABEL_NAME"),
+    productTitle: pick("productTitle", "SMOKE_PRODUCT_TITLE"),
+    productDescription: pick("productDescription", "SMOKE_PRODUCT_DESCRIPTION"),
+    variantSku: pick("variantSku", "SMOKE_VARIANT_SKU"),
+  };
+
+  const required = [
+    ["SMOKE_ADMIN_EMAIL", cfg.adminEmail],
+    ["SMOKE_ARTIST_USER_ID", cfg.artistUserId],
+    ["SMOKE_LABEL_USER_ID", cfg.labelUserId],
+    ["SMOKE_ARTIST_EMAIL", cfg.artistEmail],
+    ["SMOKE_LABEL_EMAIL", cfg.labelEmail],
+    ["SMOKE_ARTIST_PASSWORD", cfg.artistPassword],
+    ["SMOKE_LABEL_PASSWORD", cfg.labelPassword],
+    ["SMOKE_ARTIST_HANDLE", cfg.artistHandle],
+    ["SMOKE_ARTIST_NAME", cfg.artistName],
+    ["SMOKE_LABEL_HANDLE", cfg.labelHandle],
+    ["SMOKE_LABEL_NAME", cfg.labelName],
+    ["SMOKE_PRODUCT_TITLE", cfg.productTitle],
+    ["SMOKE_PRODUCT_DESCRIPTION", cfg.productDescription],
+    ["SMOKE_VARIANT_SKU", cfg.variantSku],
+  ];
+
+  const missing = required.filter(([, value]) => !value).map(([name]) => name);
+  if (missing.length > 0) {
+    throw new Error(
+      `seed_featured_artist requires env vars (or SMOKE_SEED_USERS_JSON values): ${missing.join(", ")}`
+    );
+  }
+
+  return cfg;
 };
+
+const SEED_CONFIG = loadSeedConfig();
 
 const ensureUser = async (db, { id, email, role, password }) => {
   const passwordHash = await hashPassword(password);
@@ -45,35 +92,35 @@ const ensureUser = async (db, { id, email, role, password }) => {
 };
 
 async function runSeed(db) {
-  const adminUser = await db("users").where({ email: ADMIN_EMAIL }).first("id");
+  const adminUser = await db("users").where({ email: SEED_CONFIG.adminEmail }).first("id");
   if (!adminUser?.id) {
-    throw new Error("admin@test.com is required for UI smoke seed");
+    throw new Error(`Admin user ${SEED_CONFIG.adminEmail} is required for UI smoke seed`);
   }
 
   const artistUser = await ensureUser(db, {
-    id: ARTIST_USER_ID,
-    email: ARTIST_EMAIL,
+    id: SEED_CONFIG.artistUserId,
+    email: SEED_CONFIG.artistEmail,
     role: "artist",
-    password: resolvePassword("ARTIST_PASSWORD", "artist123"),
+    password: SEED_CONFIG.artistPassword,
   });
 
   const labelUser = await ensureUser(db, {
-    id: LABEL_USER_ID,
-    email: LABEL_EMAIL,
+    id: SEED_CONFIG.labelUserId,
+    email: SEED_CONFIG.labelEmail,
     role: "label",
-    password: resolvePassword("LABEL_PASSWORD", "label123"),
+    password: SEED_CONFIG.labelPassword,
   });
 
   let artist = await db("artists")
-    .where({ handle: ARTIST_HANDLE })
+    .where({ handle: SEED_CONFIG.artistHandle })
     .first("id", "handle", "name", "is_featured");
 
   if (!artist) {
     const [createdArtist] = await db("artists")
       .insert({
         id: randomUUID(),
-        handle: ARTIST_HANDLE,
-        name: ARTIST_NAME,
+        handle: SEED_CONFIG.artistHandle,
+        name: SEED_CONFIG.artistName,
         is_featured: true,
         created_at: db.fn.now(),
       })
@@ -87,13 +134,13 @@ async function runSeed(db) {
     artist = updatedArtist || artist;
   }
 
-  let label = await db("labels").where({ handle: LABEL_HANDLE }).first("id", "handle", "name");
+  let label = await db("labels").where({ handle: SEED_CONFIG.labelHandle }).first("id", "handle", "name");
   if (!label) {
     const [createdLabel] = await db("labels")
       .insert({
         id: randomUUID(),
-        handle: LABEL_HANDLE,
-        name: LABEL_NAME,
+        handle: SEED_CONFIG.labelHandle,
+        name: SEED_CONFIG.labelName,
         created_at: db.fn.now(),
       })
       .returning(["id", "handle", "name"]);
@@ -128,7 +175,7 @@ async function runSeed(db) {
     .merge({ label_id: label.id });
 
   let product = await db("products")
-    .where({ artist_id: artist.id, title: PRODUCT_TITLE })
+    .where({ artist_id: artist.id, title: SEED_CONFIG.productTitle })
     .first("id", "artist_id", "title", "description", "is_active");
 
   if (!product) {
@@ -136,8 +183,8 @@ async function runSeed(db) {
       .insert({
         id: randomUUID(),
         artist_id: artist.id,
-        title: PRODUCT_TITLE,
-        description: PRODUCT_DESCRIPTION,
+        title: SEED_CONFIG.productTitle,
+        description: SEED_CONFIG.productDescription,
         is_active: true,
         created_at: db.fn.now(),
       })
@@ -147,7 +194,7 @@ async function runSeed(db) {
     const [updatedProduct] = await db("products")
       .where({ id: product.id })
       .update({
-        description: PRODUCT_DESCRIPTION,
+        description: SEED_CONFIG.productDescription,
         is_active: true,
       })
       .returning(["id", "artist_id", "title", "description", "is_active"]);
@@ -155,7 +202,7 @@ async function runSeed(db) {
   }
 
   let variant = await db("product_variants")
-    .where({ sku: VARIANT_SKU })
+    .where({ sku: SEED_CONFIG.variantSku })
     .first("id", "product_id", "sku", "size", "color", "price_cents", "stock");
 
   if (!variant) {
@@ -163,7 +210,7 @@ async function runSeed(db) {
       .insert({
         id: randomUUID(),
         product_id: product.id,
-        sku: VARIANT_SKU,
+        sku: SEED_CONFIG.variantSku,
         size: "M",
         color: "Black",
         price_cents: 2999,

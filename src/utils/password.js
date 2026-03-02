@@ -1,6 +1,6 @@
 const bcrypt = require("bcryptjs");
 
-const SALT_ROUNDS = 10;
+const SALT_ROUNDS = 14;
 
 const hashPassword = async (plain) => {
   if (!plain) throw new Error("Plaintext password is required");
