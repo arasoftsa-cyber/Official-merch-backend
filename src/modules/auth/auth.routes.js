@@ -1,9 +1,9 @@
 const express = require("express");
 const router = express.Router();
 
-const rateLimit = require("../../middleware/rateLimit");
-const { requireAuth } = require("../../middleware/auth.middleware");
-const { requirePolicy } = require("../../middleware/policy.middleware");
+const rateLimit = require("../../core/http/rateLimit");
+const { requireAuth } = require("../../core/http/auth.middleware");
+const { requirePolicy } = require("../../core/http/policy.middleware");
 const { ping, login, partnerLogin, register } = require("./auth.controller");
 
 const loginRateLimiter = rateLimit({

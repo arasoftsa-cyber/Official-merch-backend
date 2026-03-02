@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../config/db");
+const { getDb } = require("../db/db");
 const mockProvider = require("./providers/mockProvider");
 
 const providers = {

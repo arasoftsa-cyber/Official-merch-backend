@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
-const { requireAuth } = require("../../middleware/auth.middleware");
-const { requirePolicy } = require("../../middleware/policy.middleware");
+const { requireAuth } = require("../../core/http/auth.middleware");
+const { requirePolicy } = require("../../core/http/policy.middleware");
 const {
   listProducts,
   listArtistProducts,
@@ -11,7 +11,7 @@ const {
   updateProductPhotos,
 } = require("./catalog.controller");
 
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 
 const catalogPolicyCtx = async (req) => {
   const db = getDb();

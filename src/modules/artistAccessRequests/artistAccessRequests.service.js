@@ -1,8 +1,8 @@
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../config/db");
-const { UPLOADS_DIR } = require("../../config/paths");
+const { getDb } = require("../../core/db/db");
+const { UPLOADS_DIR } = require("../../core/config/paths");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;

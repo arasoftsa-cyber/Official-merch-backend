@@ -1,10 +1,10 @@
-const express = require("express");
+﻿const express = require("express");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../config/db");
-const { requireAuth } = require("../../middleware/auth.middleware");
-const { requirePolicy } = require("../../middleware/policy.middleware");
+const { getDb } = require("../../core/db/db");
+const { requireAuth } = require("../../core/http/auth.middleware");
+const { requirePolicy } = require("../../core/http/policy.middleware");
 const { listFlags } = require("../../utils/abuseFlags");
-const { createProductWithVariants } = require("../../modules/catalog/catalog.service");
+const { createProductWithVariants } = require("../catalog/catalog.api");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const router = express.Router();
@@ -1490,3 +1490,4 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+

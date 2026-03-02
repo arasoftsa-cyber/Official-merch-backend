@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const { randomUUID } = require("crypto");
-const { getDb } = require("../src/config/db");
+const { getDb } = require("../src/core/db/db");
 
 const normalizeHandle = (value) =>
   String(value || "")

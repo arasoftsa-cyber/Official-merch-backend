@@ -1,4 +1,4 @@
-const { isLabelLinkedToArtist } = require("../utils/ownership");
+const { isLabelLinkedToArtist } = require("../../utils/ownership");
 
 const labelCan = async (user, action, resource, ctx) => {
   if (typeof action !== "string") return false;

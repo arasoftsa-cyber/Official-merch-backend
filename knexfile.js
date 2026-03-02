@@ -12,7 +12,7 @@ const baseConfig = {
   client: "pg",
   connection: dbUrl,
   migrations: {
-    directory: "./src/config/migrations",
+    directory: "./src/core/db/migrations",
   },
 };
 

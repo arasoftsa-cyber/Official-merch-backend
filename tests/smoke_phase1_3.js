@@ -1,7 +1,7 @@
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const { getDb } = require("../src/config/db");
+const { getDb } = require("../src/core/db/db");
 
 const BASE_URL = process.env.API_BASE || "http://localhost:3000";
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;

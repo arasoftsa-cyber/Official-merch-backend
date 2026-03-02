@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 const {
   HOMEPAGE_ENTITY_TYPE,

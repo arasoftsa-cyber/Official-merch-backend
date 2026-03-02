@@ -1,3 +1,4 @@
+require('module-alias/register');
 const express = require("express");
 let cors;
 try {
@@ -24,10 +25,10 @@ const mediaAssetsRouter = require("./src/modules/mediaAssets/mediaAssets.routes"
 const homepageRouter = require("./src/modules/homepage/homepage.routes");
 const adminHomepageRouter = require("./src/modules/homepage/homepage.admin.routes");
 const devRoutesRouter = require("./routes/dev.routes");
-const { getDb } = require("./src/config/db");
-const { UPLOADS_DIR } = require("./src/config/paths");
-const { logRequest } = require("./src/middleware/logger");
-const { attachAuthUser } = require("./src/middleware/auth.middleware");
+const { getDb } = require("./src/core/db/db");
+const { UPLOADS_DIR } = require("./src/core/config/paths");
+const { logRequest } = require("./src/core/http/logger");
+const { attachAuthUser } = require("./src/core/http/auth.middleware");
 
 const app = express();
 const PORT = process.env.PORT || 3000;

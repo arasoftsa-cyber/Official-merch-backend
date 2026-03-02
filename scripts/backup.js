@@ -2,7 +2,7 @@ require("dotenv").config();
 const { spawnSync, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const env = require("../src/config/env");
+const env = require("../src/core/config/env");
 
 if (!env.DATABASE_URL) {
   console.error("DATABASE_URL is required to run the backup.");

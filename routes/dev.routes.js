@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../src/config/db");
+const { getDb } = require("../src/core/db/db");
 const { seedUiSmoke } = require("../scripts/seed_ui_smoke");
 
 const router = require("express").Router();

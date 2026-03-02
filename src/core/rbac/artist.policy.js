@@ -1,5 +1,5 @@
-const { getDb } = require("../config/db");
-const { isUserLinkedToArtist } = require("../utils/ownership");
+const { getDb } = require("../db/db");
+const { isUserLinkedToArtist } = require("../../utils/ownership");
 
 const artistCan = async (user, action, resource, ctx) => {
   if (action === "catalog:product:create" && resource === "self") {

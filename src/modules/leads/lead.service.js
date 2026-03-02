@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 
 const createLead = async ({
   source,

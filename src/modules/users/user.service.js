@@ -1,4 +1,4 @@
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 const { toSafeDto } = require("./user.model");
 const { randomUUID } = require("crypto");
 

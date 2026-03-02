@@ -1,5 +1,5 @@
 const knex = require("knex");
-const env = require("./env");
+const env = require("../config/env");
 
 let dbInstance = null;
 

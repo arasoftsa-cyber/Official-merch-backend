@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../src/config/db");
+const { getDb } = require("../src/core/db/db");
 const { hashPassword } = require("../src/utils/password");
 
 const ADMIN_EMAIL = "admin@test.com";

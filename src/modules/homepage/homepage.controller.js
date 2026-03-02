@@ -9,7 +9,7 @@ const {
   deleteHomepageBannerLink,
 } = require("./homepage.service");
 const { DEFAULT_HOMEPAGE_BANNER_SORT_ORDER } = require("./homepage.constants");
-const { UPLOADS_DIR } = require("../../config/paths");
+const { UPLOADS_DIR } = require("../../core/config/paths");
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

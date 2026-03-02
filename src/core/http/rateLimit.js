@@ -1,5 +1,5 @@
 const buckets = new Map();
-const { recordFlag } = require("../utils/abuseFlags");
+const { recordFlag } = require("../../utils/abuseFlags");
 
 const NODE_ENV = String(process.env.NODE_ENV || "").toLowerCase();
 const RATE_LIMIT_DISABLED =

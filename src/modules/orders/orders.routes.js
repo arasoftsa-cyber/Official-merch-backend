@@ -1,10 +1,10 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../config/db");
-const { requireAuth } = require("../../middleware/auth.middleware");
-const rateLimit = require("../../middleware/rateLimit");
-const { orderSpamGuard } = require("../../middleware/spamDetection");
-const { startPaymentForOrder, confirmAttempt } = require("../../payments/paymentService");
+const { getDb } = require("../../core/db/db");
+const { requireAuth } = require("../../core/http/auth.middleware");
+const rateLimit = require("../../core/http/rateLimit");
+const { orderSpamGuard } = require("../../core/http/spamDetection");
+const { startPaymentForOrder, confirmAttempt } = require("../payments/payments.api");
 
 const router = express.Router();
 

@@ -1,5 +1,5 @@
 const { createLead } = require("./lead.service");
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 
 const CONTACT_REQUIRED = { error: "lead_contact_required" };
 const MAX_LEN = {

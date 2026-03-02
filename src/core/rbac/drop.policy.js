@@ -1,4 +1,4 @@
-const { isLabelLinkedToArtist, isUserLinkedToArtist } = require("../utils/ownership");
+const { isLabelLinkedToArtist, isUserLinkedToArtist } = require("../../utils/ownership");
 
 const dropCan = async (user, action, resource, ctx) => {
   if (!user) return false;

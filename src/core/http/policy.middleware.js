@@ -1,4 +1,4 @@
-const { can } = require("../policies");
+const { can } = require("../rbac");
 
 const FORBIDDEN = { error: "forbidden" };
 

@@ -1,7 +1,7 @@
-const { signToken } = require("../../utils/jwt");
+﻿const { signToken } = require("../../utils/jwt");
 const { hashPassword, verifyPassword } = require("../../utils/password");
-const { getDb } = require("../../config/db");
-const userService = require("../users/user.service");
+const { getDb } = require("../../core/db/db");
+const userService = require("../users/user.api");
 
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
 const authDebugEnabled = process.env.AUTH_DEBUG === "1";
@@ -181,3 +181,4 @@ const register = async (req, res) => {
 };
 
 module.exports = { ping, login, partnerLogin, register };
+

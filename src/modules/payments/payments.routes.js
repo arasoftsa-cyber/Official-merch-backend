@@ -1,6 +1,6 @@
 const express = require("express");
-const { getDb } = require("../../config/db");
-const { applyWebhookEvent } = require("../../payments/paymentService");
+const { getDb } = require("../../core/db/db");
+const { applyWebhookEvent } = require("./payments.api");
 
 const router = express.Router();
 

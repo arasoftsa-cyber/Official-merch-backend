@@ -1,6 +1,6 @@
 const express = require("express");
-const { requireAuth } = require("../../middleware/auth.middleware");
-const { requirePolicy } = require("../../middleware/policy.middleware");
+const { requireAuth } = require("../../core/http/auth.middleware");
+const { requirePolicy } = require("../../core/http/policy.middleware");
 const {
   getHomepageBanners,
   createHomepageBannerHandler,

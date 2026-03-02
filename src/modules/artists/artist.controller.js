@@ -1,5 +1,5 @@
 const artistService = require("./artist.service");
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 
 const NOT_FOUND = { error: "artist_not_found" };

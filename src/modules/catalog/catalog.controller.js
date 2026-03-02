@@ -13,7 +13,7 @@ const {
   attachListingPhotosToProducts,
 } = require("./catalog.service");
 
-const { getDb } = require("../../config/db");
+const { getDb } = require("../../core/db/db");
 
 const BAD_REQUEST = { error: "bad_request" };
 const NOT_FOUND = { error: "product_not_found" };

@@ -1,8 +1,8 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../config/db");
-const { requireAuth } = require("../../middleware/auth.middleware");
-const { requirePolicy } = require("../../middleware/policy.middleware");
+const { getDb } = require("../../core/db/db");
+const { requireAuth } = require("../../core/http/auth.middleware");
+const { requirePolicy } = require("../../core/http/policy.middleware");
 const {
   isUserLinkedToArtist,
   isLabelLinkedToArtist,
