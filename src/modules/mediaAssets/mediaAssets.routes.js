@@ -104,12 +104,50 @@ const parseMultipartFormData = async (req) => {
   return { fields, file };
 };
 
+const ALLOWED_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+const MAX_FILE_SIZE = 5 * 1024; // 5MB
+
+const MAGIC_NUMBERS = {
+  'image/jpeg': [0xFF, 0xD8, 0xFF],
+  'image/png': [0x89, 0x50, 0x4E, 0x47],
+  'image/webp': [0x52, 0x49, 0x46, 0x46],
+  'image/gif': [0x47, 0x49, 0x46],
+};
+
+const validateFileBuffer = (buffer, declaredMimeType) => {
+  if (buffer.length > MAX_FILE_SIZE) {
+    throw new Error('File too large');
+  }
+
+  const magic = MAGIC_NUMBERS[declaredMimeType];
+  if (!magic) return false;
+
+  for (let i = 0; i < magic.length; i++) {
+    if (buffer[i] !== magic[i]) return false;
+  }
+  return true;
+};
+
 const sanitizeExt = (filename) => {
   const originalExt = path.extname(filename || "").slice(0, 12);
   return /^[.][a-z0-9]+$/i.test(originalExt) ? originalExt.toLowerCase() : "";
 };
 
 const saveUploadedFile = async (file) => {
+  if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+    throw new Error('Invalid file type');
+  }
+
+  if (!validateFileBuffer(file.buffer, file.mimetype)) {
+    throw new Error('File content does not match declared type');
+  }
+
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   const ext = sanitizeExt(file.originalname);
   const filename = `${Date.now()}-${randomUUID()}${ext}`;

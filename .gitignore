@@ -5,3 +5,5 @@ node_modules/
 /uploads/
 /src/uploads/
 tests/reports/
+.env.local
+.env.*.local

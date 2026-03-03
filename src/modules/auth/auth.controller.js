@@ -3,6 +3,7 @@
 const { hashPassword, verifyPassword } = require("../../utils/password");
 const { getDb } = require("../../core/db/db");
 const { ok, fail } = require("../../core/http/errorResponse");
+const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLockoutTime } = require("../../core/http/accountLockout");
 const authService = require("./auth.service");
 const userService = require("../users/user.api");
 
@@ -128,6 +129,16 @@ const buildAuthResponse = async (user) => {
   };
 };
 
+const validatePasswordStrength = (password) => {
+  if (typeof password !== "string") return false;
+  if (password.length < 12) return false;
+  if (!/[A-Z]/.test(password)) return false;
+  if (!/[a-z]/.test(password)) return false;
+  if (!/[0-9]/.test(password)) return false;
+  if (!/[^A-Za-z0-9]/.test(password)) return false;
+  return true;
+};
+
 const ping = (req, res) => {
   ok(res, { ok: true, module: "auth" });
 };
@@ -135,10 +146,39 @@ const ping = (req, res) => {
 const login = async (req, res) => {
   try {
     const { email, password } = req.body || {};
+    const normalizeEmail = String(email || "").trim().toLowerCase();
+
+    if (isLockedOut(normalizeEmail)) {
+      const remainingSeconds = Math.ceil(getRemainingLockoutTime(normalizeEmail) / 1000);
+      return fail(
+        res,
+        429,
+        "account_locked",
+        `Too many failed attempts. Try again in ${remainingSeconds} seconds`
+      );
+    }
+
     const user = await authenticateCredentials({ email, password, portal: "fan_or_general" });
     if (!user) {
-      return fail(res, 401, "invalid_credentials", "Invalid email or password");
+      const attempt = recordFailedAttempt(normalizeEmail);
+      if (attempt.lockedOut) {
+        const remainingSeconds = Math.ceil(getRemainingLockoutTime(normalizeEmail) / 1000);
+        return fail(
+          res,
+          429,
+          "account_locked",
+          `Too many failed attempts. Try again in ${remainingSeconds} seconds`
+        );
+      }
+      return fail(
+        res,
+        401,
+        "invalid_credentials",
+        `Invalid email or password. ${attempt.remainingAttempts} attempts remaining`
+      );
     }
+
+    clearFailedAttempts(normalizeEmail);
     const payload = await buildAuthResponse(user);
     setAuthCookies(res, payload);
     return ok(res, payload);
@@ -195,8 +235,10 @@ const register = async (req, res) => {
       return fail(res, 400, "validation_error", "Invalid email");
     }
 
-    if (typeof password !== "string" || password.length < 6) {
-      return fail(res, 400, "validation_error", "Password must be at least 6 characters");
+    if (!validatePasswordStrength(password)) {
+      return fail(res, 400, "validation_error",
+        "Password must be at least 12 characters and include uppercase, lowercase, numbers, and special characters"
+      );
     }
 
     const existing = await findAuthUserByEmail(normalizedEmail);
@@ -230,15 +272,20 @@ const register = async (req, res) => {
 
 const refresh = async (req, res) => {
   try {
-    const cookies = parseCookies(req.headers.cookie);
-    const refreshToken = String(
-      req.body?.refreshToken || cookies[REFRESH_COOKIE_NAME] || ""
-    ).trim();
+    const refreshToken =
+      req.cookies?.refreshToken ||
+      req.cookies?.refresh_token ||
+      req.body?.refreshToken ||
+      req.cookies?.[REFRESH_COOKIE_NAME] ||
+      null;
+
     if (!refreshToken) {
-      return fail(res, 400, "validation_error", "refreshToken is required");
+      return fail(res, 401, "unauthorized", "missing_refresh_token");
     }
 
-    const rotated = await authService.rotateRefreshToken({ refreshToken });
+    const rotated = await authService.rotateRefreshToken({
+      refreshToken: String(refreshToken).trim(),
+    });
     setAuthCookies(res, rotated);
     return ok(res, {
       accessToken: rotated.accessToken,
