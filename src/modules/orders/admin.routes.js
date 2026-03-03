@@ -981,6 +981,304 @@ const fetchAdminArtistDetailPayload = async (db, artistId) => {
   };
 };
 
+const toDateOnlyOrNull = (value) => {
+  if (!value) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+};
+
+const SUBSCRIPTION_STATUS_VALUES = new Set(["active", "expired", "cancelled"]);
+const ADVANCED_PAYMENT_MODE_VALUES = new Set(["cash", "online"]);
+
+const normalizeSubscriptionStatus = (value) =>
+  String(value ?? "").trim().toLowerCase();
+const normalizePaymentMode = (value) => String(value ?? "").trim().toLowerCase();
+const normalizePlanType = (value) => String(value ?? "").trim().toLowerCase();
+const isIsoDateOnly = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? "").trim());
+
+const formatSubscriptionPayload = (row, fallbackArtistId = "") => {
+  if (!row) return null;
+  return {
+    id: row.id || null,
+    artistId: row.artist_id || fallbackArtistId || null,
+    requestedPlanType: row.requested_plan_type || null,
+    approvedPlanType: row.approved_plan_type || null,
+    startDate: toDateOnlyOrNull(row.start_date),
+    endDate: toDateOnlyOrNull(row.end_date),
+    paymentMode: row.payment_mode || null,
+    transactionId: row.transaction_id || null,
+    status: row.status || null,
+    approvedAt: toIsoOrNull(row.approved_at),
+    approvedByAdminId: row.approved_by_admin_id || null,
+  };
+};
+
+const fetchActiveArtistSubscriptionPayload = async (db, artistId) => {
+  const hasArtistsTable = await db.schema.hasTable("artists");
+  if (!hasArtistsTable) {
+    return {
+      statusCode: 404,
+      body: { error: "not_found", message: "Artist not found" },
+    };
+  }
+
+  const artist = await db("artists").where({ id: artistId }).first("id");
+  if (!artist?.id) {
+    return {
+      statusCode: 404,
+      body: { error: "not_found", message: "Artist not found" },
+    };
+  }
+
+  const hasSubscriptionsTable = await db.schema.hasTable("artist_subscriptions");
+  if (!hasSubscriptionsTable) {
+    return {
+      statusCode: 200,
+      body: null,
+    };
+  }
+
+  const subscriptionColumns = await db("artist_subscriptions").columnInfo();
+  let query = db("artist_subscriptions").where({
+    artist_id: artistId,
+    status: "active",
+  });
+  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "approved_at")) {
+    query = query.orderBy("approved_at", "desc");
+  }
+  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "created_at")) {
+    query = query.orderBy("created_at", "desc");
+  }
+  const active = await query.first();
+
+  return {
+    statusCode: 200,
+    body: formatSubscriptionPayload(active, artistId),
+  };
+};
+
+const updateArtistSubscriptionAction = async ({ db, subscriptionId, payload = {} }) => {
+  const subscriptionIdText = String(subscriptionId || "").trim();
+  if (!subscriptionIdText) {
+    return {
+      statusCode: 400,
+      body: { error: "validation_error", message: "subscription id is required" },
+    };
+  }
+
+  const hasSubscriptionsTable = await db.schema.hasTable("artist_subscriptions");
+  if (!hasSubscriptionsTable) {
+    return {
+      statusCode: 404,
+      body: { error: "not_found", message: "Subscription not found" },
+    };
+  }
+
+  const existing = await db("artist_subscriptions").where({ id: subscriptionIdText }).first();
+  if (!existing?.id) {
+    return {
+      statusCode: 404,
+      body: { error: "not_found", message: "Subscription not found" },
+    };
+  }
+
+  const hasPayloadKey = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+  const blockedKeys = [
+    "artist_id",
+    "artistId",
+    "requested_plan_type",
+    "requestedPlanType",
+    "approved_plan_type",
+    "approvedPlanType",
+    "start_date",
+    "startDate",
+    "approved_at",
+    "approvedAt",
+    "approved_by_admin_id",
+    "approvedByAdminId",
+  ].filter((key) => hasPayloadKey(key));
+  if (blockedKeys.length > 0) {
+    return {
+      statusCode: 400,
+      body: {
+        error: "validation_error",
+        message: `Fields are read-only: ${blockedKeys.join(", ")}`,
+      },
+    };
+  }
+
+  const next = {
+    status: normalizeSubscriptionStatus(existing.status),
+    endDate: toDateOnlyOrNull(existing.end_date),
+    startDate: toDateOnlyOrNull(existing.start_date),
+    paymentMode: String(existing.payment_mode ?? "").trim(),
+    transactionId: String(existing.transaction_id ?? "").trim(),
+  };
+
+  if (hasPayloadKey("status")) {
+    const normalized = normalizeSubscriptionStatus(payload.status);
+    if (!SUBSCRIPTION_STATUS_VALUES.has(normalized)) {
+      return {
+        statusCode: 400,
+        body: {
+          error: "validation_error",
+          message: "status must be one of: active, expired, cancelled",
+        },
+      };
+    }
+    next.status = normalized;
+  }
+
+  if (hasPayloadKey("endDate") || hasPayloadKey("end_date")) {
+    const rawEndDate = String(payload.endDate ?? payload.end_date ?? "").trim();
+    if (!isIsoDateOnly(rawEndDate)) {
+      return {
+        statusCode: 400,
+        body: { error: "validation_error", message: "endDate must be YYYY-MM-DD" },
+      };
+    }
+    next.endDate = rawEndDate;
+  }
+
+  if (!next.startDate || !next.endDate || next.endDate < next.startDate) {
+    return {
+      statusCode: 400,
+      body: {
+        error: "validation_error",
+        message: "endDate must be greater than or equal to startDate",
+      },
+    };
+  }
+
+  const approvedPlanType = normalizePlanType(existing.approved_plan_type);
+  const paymentModeProvided = hasPayloadKey("payment_mode") || hasPayloadKey("paymentMode");
+  const transactionIdProvided = hasPayloadKey("transaction_id") || hasPayloadKey("transactionId");
+  const statusProvided = hasPayloadKey("status");
+  const endDateProvided = hasPayloadKey("endDate") || hasPayloadKey("end_date");
+  const hasNonPaymentMutation = statusProvided || endDateProvided;
+
+  if (approvedPlanType === "basic") {
+    if ((paymentModeProvided || transactionIdProvided) && !hasNonPaymentMutation) {
+      return {
+        statusCode: 400,
+        body: {
+          error: "validation_error",
+          message: "Payment fields are fixed to NA for basic plan subscriptions",
+        },
+      };
+    }
+    next.paymentMode = "NA";
+    next.transactionId = "NA";
+  } else if (approvedPlanType === "advanced") {
+    if (paymentModeProvided || transactionIdProvided) {
+      const rawPaymentMode = normalizePaymentMode(payload.payment_mode ?? payload.paymentMode);
+      const rawTransactionId = String(
+        payload.transaction_id ?? payload.transactionId ?? ""
+      ).trim();
+      if (!ADVANCED_PAYMENT_MODE_VALUES.has(rawPaymentMode)) {
+        return {
+          statusCode: 400,
+          body: {
+            error: "validation_error",
+            message: "paymentMode must be one of: cash, online",
+          },
+        };
+      }
+      if (!rawTransactionId) {
+        return {
+          statusCode: 400,
+          body: {
+            error: "validation_error",
+            message: "transactionId is required for advanced plan",
+          },
+        };
+      }
+      next.paymentMode = rawPaymentMode;
+      next.transactionId = rawTransactionId;
+    } else {
+      const currentPaymentMode = normalizePaymentMode(next.paymentMode);
+      const currentTransactionId = String(next.transactionId || "").trim();
+      if (
+        !ADVANCED_PAYMENT_MODE_VALUES.has(currentPaymentMode) ||
+        !currentTransactionId
+      ) {
+        return {
+          statusCode: 400,
+          body: {
+            error: "validation_error",
+            message:
+              "Advanced plan requires valid paymentMode (cash|online) and transactionId",
+          },
+        };
+      }
+      next.paymentMode = currentPaymentMode;
+      next.transactionId = currentTransactionId;
+    }
+  } else if (paymentModeProvided || transactionIdProvided) {
+    return {
+      statusCode: 400,
+      body: {
+        error: "validation_error",
+        message: "payment fields are editable only for advanced plan subscriptions",
+      },
+    };
+  }
+
+  if (next.status === "active") {
+    const conflict = await db("artist_subscriptions")
+      .where({ artist_id: existing.artist_id, status: "active" })
+      .andWhereNot("id", subscriptionIdText)
+      .first("id");
+    if (conflict?.id) {
+      return {
+        statusCode: 409,
+        body: {
+          error: "active_subscription_exists",
+          message: "Artist already has another active subscription",
+        },
+      };
+    }
+  }
+
+  const updatePayload = {};
+  if (next.endDate !== toDateOnlyOrNull(existing.end_date)) {
+    updatePayload.end_date = next.endDate;
+  }
+  if (next.status !== normalizeSubscriptionStatus(existing.status)) {
+    updatePayload.status = next.status;
+  }
+  if (next.paymentMode !== String(existing.payment_mode ?? "").trim()) {
+    updatePayload.payment_mode = next.paymentMode;
+  }
+  if (next.transactionId !== String(existing.transaction_id ?? "").trim()) {
+    updatePayload.transaction_id = next.transactionId;
+  }
+  updatePayload.updated_at = db.fn.now();
+
+  if (Object.keys(updatePayload).length === 1 && updatePayload.updated_at) {
+    return {
+      statusCode: 400,
+      body: { error: "no_fields", message: "No subscription changes detected" },
+    };
+  }
+
+  const updatedRows = await db("artist_subscriptions")
+    .where({ id: subscriptionIdText })
+    .update(updatePayload)
+    .returning("*");
+  const updated = updatedRows?.[0] || null;
+
+  return {
+    statusCode: 200,
+    body: formatSubscriptionPayload(updated, existing.artist_id),
+  };
+};
+
 router.get("/artists", requireAuth, async (req, res) => {
   try {
     if (!ensureAdmin(req, res)) return;
@@ -1130,6 +1428,54 @@ router.get("/artists", requireAuth, async (req, res) => {
     return res.json({ items, total: rows.length });
   } catch (err) {
     console.error("[admin artists] error", err);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+});
+
+router.get("/artists/:artistId/subscription", requireAuth, async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) return;
+    const artistId = String(req.params.artistId || "").trim();
+    if (!artistId) {
+      return res.status(400).json({ error: "validation_error", message: "artist id is required" });
+    }
+
+    const db = getDb();
+    const subscriptionPayload = await fetchActiveArtistSubscriptionPayload(db, artistId);
+    return res.status(subscriptionPayload.statusCode).json(subscriptionPayload.body);
+  } catch (err) {
+    console.error("[admin artist subscription] error", err);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+});
+
+router.patch("/artist-subscriptions/:subscriptionId", requireAuth, async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) return;
+    const subscriptionId = String(req.params.subscriptionId || "").trim();
+    if (!subscriptionId) {
+      return res
+        .status(400)
+        .json({ error: "validation_error", message: "subscription id is required" });
+    }
+
+    const db = getDb();
+    const result = await db.transaction(async (trx) =>
+      updateArtistSubscriptionAction({
+        db: trx,
+        subscriptionId,
+        payload: req.body || {},
+      })
+    );
+    return res.status(result.statusCode).json(result.body);
+  } catch (err) {
+    if (err?.code === "23505") {
+      return res.status(409).json({
+        error: "active_subscription_exists",
+        message: "Artist already has another active subscription",
+      });
+    }
+    console.error("[admin artist subscription patch] error", err);
     return res.status(500).json({ error: "internal_server_error" });
   }
 });
@@ -1490,4 +1836,8 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.__test = {
+  fetchActiveArtistSubscriptionPayload,
+  updateArtistSubscriptionAction,
+};
 

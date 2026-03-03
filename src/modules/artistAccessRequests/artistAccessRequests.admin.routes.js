@@ -7,6 +7,8 @@ const { hashPassword } = require("../../utils/password");
 const { signToken } = require("../../utils/jwt");
 const { copyRequestProfilePhotoToArtist } = require("./artistAccessRequests.service");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const { validateApprovalPayload } = require("../artists/planValidation");
+const { PLAN_TYPES, PLAN_TYPE_VALUES, normalizePlan } = require("../artists/planTypes");
 
 const ROUTER = express.Router();
 const STATUS_OPTIONS = new Set(["pending", "approved", "rejected"]);
@@ -19,6 +21,21 @@ const isUuid = (value) =>
   );
 
 const trim = (value) => (typeof value === "string" ? value.trim() : "");
+const pad2 = (value) => String(value).padStart(2, "0");
+const toLocalDateString = (value) =>
+  `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
+
+const getSubscriptionDateWindow = () => {
+  const now = new Date();
+  const start = new Date(now);
+  const end = new Date(now);
+  end.setFullYear(end.getFullYear() + 1);
+  end.setDate(end.getDate() + 7);
+  return {
+    startDate: toLocalDateString(start),
+    endDate: toLocalDateString(end),
+  };
+};
 
 const normalizeForResponse = (status) =>
   status === "denied" ? "rejected" : status || "pending";
@@ -29,6 +46,32 @@ const normalizeStatusFilter = (value) => {
   if (!LIST_STATUS_OPTIONS.has(normalized)) return null;
   return normalized;
 };
+
+const ADMIN_REQUEST_LIST_COLUMNS = [
+  "id",
+  "artist_name",
+  "name",
+  "handle",
+  "handle_suggestion",
+  "email",
+  "contact_email",
+  "phone",
+  "contact_phone",
+  "socials",
+  "about_me",
+  "pitch",
+  "profile_photo_url",
+  "profile_photo_path",
+  "message_for_fans",
+  "requested_plan_type",
+  "approved_plan_type",
+  "status",
+  "source",
+  "label_id",
+  "rejection_comment",
+  "created_at",
+  "updated_at",
+];
 
 const mapRow = (row) => ({
   id: row.id,
@@ -47,6 +90,10 @@ const mapRow = (row) => ({
     row.profile_photo_media_url || row.profile_photo_url || row.profile_photo_path || ""
   ),
   messageForFans: row.message_for_fans || "",
+  requested_plan_type: row.requested_plan_type || "basic",
+  requestedPlanType: row.requested_plan_type || "basic",
+  approved_plan_type: row.approved_plan_type || null,
+  approvedPlanType: row.approved_plan_type || null,
   rejectionComment: row.rejection_comment || "",
 });
 
@@ -242,7 +289,63 @@ const sendRejectionEmail = async ({ email, artistName, comment }) => {
   });
 };
 
-const processApproval = async ({ id, adminId }) => {
+const normalizeRequestedPlanType = (request) => {
+  const requested = normalizePlan(request?.requested_plan_type);
+  if (PLAN_TYPE_VALUES.includes(requested)) {
+    return requested;
+  }
+  return PLAN_TYPES.BASIC;
+};
+
+const createArtistSubscription = async ({
+  trx,
+  artistId,
+  request,
+  approvalPayload,
+  adminId,
+}) => {
+  const existingActiveSubscription = await trx("artist_subscriptions")
+    .where({ artist_id: artistId, status: "active" })
+    .first("id");
+  if (existingActiveSubscription?.id) {
+    return { conflict: true, subscriptionId: existingActiveSubscription.id };
+  }
+
+  const { startDate, endDate } = getSubscriptionDateWindow();
+  const now = trx.fn.now();
+  const subscriptionColumns = await trx("artist_subscriptions").columnInfo();
+  const subscriptionInsert = {
+    artist_id: artistId,
+    requested_plan_type: normalizeRequestedPlanType(request),
+    approved_plan_type: approvalPayload.final_plan_type,
+    start_date: startDate,
+    end_date: endDate,
+    payment_mode: approvalPayload.payment_mode,
+    transaction_id: approvalPayload.transaction_id,
+    status: "active",
+  };
+
+  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "approved_by_admin_id")) {
+    subscriptionInsert.approved_by_admin_id = adminId || null;
+  }
+  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "approved_at")) {
+    subscriptionInsert.approved_at = now;
+  }
+  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "created_at")) {
+    subscriptionInsert.created_at = now;
+  }
+  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "updated_at")) {
+    subscriptionInsert.updated_at = now;
+  }
+
+  const inserted = await trx("artist_subscriptions")
+    .insert(subscriptionInsert)
+    .returning(["id"]);
+
+  return { conflict: false, id: inserted?.[0]?.id || null };
+};
+
+const processApproval = async ({ id, adminId, approvalPayload }) => {
   return getDb().transaction(async (trx) => {
     const request = await trx("artist_access_requests").where({ id }).first();
     if (!request) return { notFound: true };
@@ -272,6 +375,17 @@ const processApproval = async ({ id, adminId }) => {
       result: photoLinkResult,
     });
 
+    const subscriptionResult = await createArtistSubscription({
+      trx,
+      artistId: artist.id,
+      request,
+      approvalPayload,
+      adminId,
+    });
+    if (subscriptionResult.conflict) {
+      return { subscriptionConflict: true };
+    }
+
     const requestColumns = await trx("artist_access_requests").columnInfo();
     const updates = {
       status: "approved",
@@ -292,6 +406,21 @@ const processApproval = async ({ id, adminId }) => {
     if (Object.prototype.hasOwnProperty.call(requestColumns, "rejection_comment")) {
       updates.rejection_comment = null;
     }
+    if (Object.prototype.hasOwnProperty.call(requestColumns, "approved_plan_type")) {
+      updates.approved_plan_type = approvalPayload.final_plan_type;
+    }
+    if (Object.prototype.hasOwnProperty.call(requestColumns, "approved_by_admin_id")) {
+      updates.approved_by_admin_id = adminId || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(requestColumns, "approved_at")) {
+      updates.approved_at = trx.fn.now();
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(requestColumns, "requested_plan_type") &&
+      !trim(request.requested_plan_type)
+    ) {
+      updates.requested_plan_type = PLAN_TYPES.BASIC;
+    }
 
     await trx("artist_access_requests").where({ id }).update(updates);
 
@@ -301,8 +430,51 @@ const processApproval = async ({ id, adminId }) => {
       artistName: trim(request.artist_name || request.name),
       user,
       artist,
+      subscriptionId: subscriptionResult.id,
     };
   });
+};
+
+const approveArtistRequestAction = async ({ id, adminId, body }) => {
+  const approvalPayload = validateApprovalPayload(body || {});
+  const result = await processApproval({
+    id,
+    adminId,
+    approvalPayload,
+  });
+
+  if (result.notFound) {
+    return {
+      httpStatus: 404,
+      payload: { error: "not_found", message: "Request not found" },
+    };
+  }
+  if (result.validationError) {
+    return {
+      httpStatus: 400,
+      payload: { error: "validation_error", message: result.message },
+    };
+  }
+  if (result.invalidTransition) {
+    return {
+      httpStatus: 409,
+      payload: {
+        error: "invalid_transition",
+        message: `Cannot transition from ${result.currentStatus} to approved`,
+      },
+    };
+  }
+  if (result.subscriptionConflict) {
+    return {
+      httpStatus: 409,
+      payload: {
+        error: "active_subscription_exists",
+        message: "Artist already has an active subscription",
+      },
+    };
+  }
+
+  return { httpStatus: 200, result };
 };
 
 const processRejection = async ({ id, adminId, comment }) => {
@@ -376,29 +548,10 @@ ROUTER.get(
         .where("status", status)
         .count({ total: "id" });
 
-      const selectColumns = pickExistingColumns(requestColumnInfo, [
-        "id",
-        "artist_name",
-        "name",
-        "handle",
-        "handle_suggestion",
-        "email",
-        "contact_email",
-        "phone",
-        "contact_phone",
-        "socials",
-        "about_me",
-        "pitch",
-        "profile_photo_url",
-        "profile_photo_path",
-        "message_for_fans",
-        "status",
-        "source",
-        "label_id",
-        "rejection_comment",
-        "created_at",
-        "updated_at",
-      ]);
+      const selectColumns = pickExistingColumns(
+        requestColumnInfo,
+        ADMIN_REQUEST_LIST_COLUMNS
+      );
 
       const baseSelections = selectColumns.map(
         (column) => `artist_access_requests.${column} as ${column}`
@@ -461,19 +614,15 @@ ROUTER.post("/:id/approve", requireAuth, policy, async (req, res) => {
         .json({ error: "validation_error", message: "Invalid id" });
     }
 
-    const result = await processApproval({ id: req.params.id, adminId: req.user?.id || null });
-    if (result.notFound) {
-      return res.status(404).json({ error: "not_found", message: "Request not found" });
+    const approval = await approveArtistRequestAction({
+      id: req.params.id,
+      adminId: req.user?.id || null,
+      body: req.body || {},
+    });
+    if (approval.httpStatus !== 200) {
+      return res.status(approval.httpStatus).json(approval.payload);
     }
-    if (result.validationError) {
-      return res.status(400).json({ error: "validation_error", message: result.message });
-    }
-    if (result.invalidTransition) {
-      return res.status(409).json({
-        error: "invalid_transition",
-        message: `Cannot transition from ${result.currentStatus} to approved`,
-      });
-    }
+    const result = approval.result;
 
     const resetLink = buildResetLink(result.user);
     await sendApprovalEmail({
@@ -490,6 +639,12 @@ ROUTER.post("/:id/approve", requireAuth, policy, async (req, res) => {
       userId: result.user?.id ?? null,
     });
   } catch (err) {
+    if (err?.status === 400) {
+      return res.status(400).json({
+        error: err.code || "validation_error",
+        message: err.message || "Invalid approval payload",
+      });
+    }
     console.error("[approve_artist_request]", err?.stack || err);
     return res.status(500).json({ error: "internal_server_error" });
   }
@@ -542,3 +697,10 @@ ROUTER.post("/:id/reject", requireAuth, policy, express.json(), async (req, res)
 });
 
 module.exports = ROUTER;
+module.exports.__test = {
+  processApproval,
+  approveArtistRequestAction,
+  getSubscriptionDateWindow,
+  mapRow,
+  ADMIN_REQUEST_LIST_COLUMNS,
+};

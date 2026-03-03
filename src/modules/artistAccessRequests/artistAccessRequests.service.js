@@ -4,6 +4,7 @@ const { randomUUID } = require("crypto");
 const { getDb } = require("../../core/db/db");
 const { UPLOADS_DIR } = require("../../core/config/paths");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const { PLAN_TYPES, assertPlanAllowed } = require("../artists/planTypes");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const HANDLE_RE = /^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/;
@@ -78,6 +79,13 @@ const normalizeSocials = (input) => {
 };
 
 const normalizePayload = (rawBody = {}) => {
+  const hasPaymentFields = [
+    "payment_mode",
+    "paymentMode",
+    "transaction_id",
+    "transactionId",
+  ].some((key) => Object.prototype.hasOwnProperty.call(rawBody, key));
+
   return {
     artist_name: trim(rawBody.artist_name || rawBody.artistName),
     handle: normalizeHandle(rawBody.handle),
@@ -88,6 +96,9 @@ const normalizePayload = (rawBody = {}) => {
       rawBody.message_for_fans || rawBody.messageForFans || rawBody.fan_message
     ),
     socials: rawBody.socials,
+    requested_plan_type_input:
+      rawBody.requested_plan_type ?? rawBody.planType ?? rawBody.requestedPlanType,
+    has_payment_fields: hasPaymentFields,
   };
 };
 
@@ -105,6 +116,16 @@ const validatePayload = (payload) => {
   if (!payload.handle) addDetail(details, "handle", "handle is required");
   if (!payload.email) addDetail(details, "email", "email is required");
   if (!payload.phone) addDetail(details, "phone", "phone is required");
+  if (!trim(payload.requested_plan_type_input)) {
+    addDetail(details, "requested_plan_type", "requested_plan_type is required");
+  }
+  if (payload.has_payment_fields) {
+    addDetail(
+      details,
+      "payment",
+      "payment_mode and transaction_id are not accepted at submission stage"
+    );
+  }
 
   if (payload.artist_name && payload.artist_name.length < 2) {
     addDetail(details, "artist_name", "artist_name must be at least 2 characters");
@@ -221,6 +242,19 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
   if (details.length > 0) {
     throw validationError(details);
   }
+  let requestedPlanType = PLAN_TYPES.BASIC;
+  try {
+    requestedPlanType = assertPlanAllowed(payload.requested_plan_type_input, {
+      fieldName: "requested_plan_type",
+    });
+  } catch (error) {
+    throw validationError([
+      {
+        field: "requested_plan_type",
+        message: error?.message || "requested_plan_type is invalid",
+      },
+    ]);
+  }
   if (file && !PROFILE_PHOTO_FIELDS.has(file.fieldname)) {
     throw validationError([
       { field: "profile_photo", message: "profile_photo field name is invalid" },
@@ -271,6 +305,9 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
       }
       if (Object.prototype.hasOwnProperty.call(tableInfo, "status")) {
         insertPayload.status = "pending";
+      }
+      if (Object.prototype.hasOwnProperty.call(tableInfo, "requested_plan_type")) {
+        insertPayload.requested_plan_type = requestedPlanType;
       }
       if (Object.prototype.hasOwnProperty.call(tableInfo, "created_at")) {
         insertPayload.created_at = trx.fn.now();

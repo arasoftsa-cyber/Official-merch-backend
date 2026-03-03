@@ -408,6 +408,7 @@ const ensurePaymentState = (res, expected) => {
         json: {
           artistName: `Smoke Requestor ${stamp}`,
           handle,
+          requested_plan_type: "basic",
           contactEmail: requestEmail,
           phone,
           pitch: "Smoke test request",
@@ -2754,7 +2755,12 @@ const ensurePaymentState = (res, expected) => {
           const res = await req(
             "POST",
             `/api/admin/artist-access-requests/${pendingArtistRequestId}/approve`,
-            { token: adminToken }
+            {
+              token: adminToken,
+              json: {
+                final_plan_type: "basic",
+              },
+            }
           );
           if (res.status !== 200) {
             throwRes(res);
