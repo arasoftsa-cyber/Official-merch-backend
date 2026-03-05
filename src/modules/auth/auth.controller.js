@@ -8,6 +8,7 @@ const authService = require("./auth.service");
 const userService = require("../users/user.api");
 
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
+const FAN_ALLOWED_ROLES = new Set(["buyer", "fan"]);
 const authDebugEnabled = process.env.AUTH_DEBUG === "1";
 const ACCESS_COOKIE_NAME = "om_access_token";
 const REFRESH_COOKIE_NAME = "om_refresh_token";
@@ -223,6 +224,60 @@ const partnerLogin = async (req, res) => {
   }
 };
 
+const fanLogin = async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    const normalizeEmail = String(email || "").trim().toLowerCase();
+
+    if (isLockedOut(normalizeEmail)) {
+      const remainingSeconds = Math.ceil(getRemainingLockoutTime(normalizeEmail) / 1000);
+      return fail(
+        res,
+        429,
+        "account_locked",
+        `Too many failed attempts. Try again in ${remainingSeconds} seconds`
+      );
+    }
+
+    const user = await authenticateCredentials({ email, password, portal: "fan_only" });
+    if (!user) {
+      const attempt = recordFailedAttempt(normalizeEmail);
+      if (attempt.lockedOut) {
+        const remainingSeconds = Math.ceil(getRemainingLockoutTime(normalizeEmail) / 1000);
+        return fail(
+          res,
+          429,
+          "account_locked",
+          `Too many failed attempts. Try again in ${remainingSeconds} seconds`
+        );
+      }
+      return fail(
+        res,
+        401,
+        "invalid_credentials",
+        `Invalid email or password. ${attempt.remainingAttempts} attempts remaining`
+      );
+    }
+
+    clearFailedAttempts(normalizeEmail);
+    const role = String(user.role || "").toLowerCase();
+    if (!FAN_ALLOWED_ROLES.has(role)) {
+      return res.status(403).json({
+        error: "ROLE_NOT_ALLOWED",
+        message: "This account is for the Partner Portal.",
+        redirectTo: "/partner/login",
+      });
+    }
+
+    const payload = await buildAuthResponse(user);
+    setAuthCookies(res, payload);
+    return ok(res, payload);
+  } catch (err) {
+    console.error("[auth.fanLogin] failed", err);
+    return fail(res, 500, "internal_server_error", "Failed to login");
+  }
+};
+
 const register = async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -322,4 +377,4 @@ const logout = async (req, res) => {
   }
 };
 
-module.exports = { ping, login, partnerLogin, register, refresh, logout };
+module.exports = { ping, login, fanLogin, partnerLogin, register, refresh, logout };

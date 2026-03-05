@@ -271,6 +271,8 @@ const collectRouterDirectRoutes = (router) => {
 
 mountedRoutes.push("/api/auth");
 app.use("/api/auth", authRoutes);
+mountedRoutes.push("/auth");
+app.use("/auth", authRoutes);
 
 mountedRoutes.push("/api/admin/provisioning");
 app.use("/api/admin/provisioning", onboardingRoutes);

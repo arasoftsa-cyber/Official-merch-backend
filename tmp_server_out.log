@@ -1,0 +1,10 @@
+[rate-limit] disabled=false env= flag=
+[dev.routes] loaded from C:\Users\49177\Documents\GitHub\DeployDaily\Official-merch-backend\routes\dev.routes.js routes= 6
+[env] NODE_ENV= undefined isProduction= false
+### BACKEND BUILD ID ### 2026-03-05T20:16:20.480Z pid= 19508
+BUILD_ID Value: 2026-03-05T20:16:20.480Z
+SMOKE_SEED_ENABLED false
+[static] uploads served from C:\Users\49177\Documents\GitHub\DeployDaily\Official-merch-backend\uploads
+[uploads] root: C:\Users\49177\Documents\GitHub\DeployDaily\Official-merch-backend\uploads
+[uploads] products: C:\Users\49177\Documents\GitHub\DeployDaily\Official-merch-backend\uploads\products
+Server running on http://localhost:3000

@@ -5,7 +5,7 @@ const rateLimit = require("../../core/http/rateLimit");
 const { ok } = require("../../core/http/errorResponse");
 const { requireAuth } = require("../../core/http/auth.middleware");
 const { requirePolicy } = require("../../core/http/policy.middleware");
-const { ping, login, partnerLogin, register, refresh, logout } = require("./auth.controller");
+const { ping, login, fanLogin, partnerLogin, register, refresh, logout } = require("./auth.controller");
 
 const isProd = process.env.NODE_ENV === "production";
 const loginRateLimiter = rateLimit({
@@ -20,6 +20,12 @@ router.post(
   express.json(),
   loginRateLimiter,
   login
+);
+router.post(
+  "/fan/login",
+  express.json(),
+  loginRateLimiter,
+  fanLogin
 );
 router.post(
   "/partner/login",
