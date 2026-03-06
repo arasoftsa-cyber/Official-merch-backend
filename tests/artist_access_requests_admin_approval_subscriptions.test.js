@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { describe, test, afterEach } = require("node:test");
+const { verifyPassword } = require("../src/utils/password");
 
 const DB_MODULE_PATH = path.resolve(__dirname, "../src/core/db/db.js");
 const ROUTE_MODULE_PATH = path.resolve(
@@ -41,6 +42,7 @@ const createFakeDb = (options = {}) => {
       {
         id: "33333333-3333-3333-3333-333333333333",
         email: "approve-test@example.com",
+        password_hash: "old-hash",
         role: "fan",
       },
     ],
@@ -253,7 +255,10 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
     const approval = await approveArtistRequestAction({
       id: REQUEST_ID,
       adminId: ADMIN_ID,
-      body: { final_plan_type: "basic" },
+      body: {
+        final_plan_type: "basic",
+        password: "AdminSet123!",
+      },
     });
 
     assert.equal(approval.httpStatus, 200);
@@ -276,7 +281,10 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
         approveArtistRequestAction({
           id: REQUEST_ID,
           adminId: ADMIN_ID,
-          body: { final_plan_type: "advanced" },
+          body: {
+            final_plan_type: "advanced",
+            password: "AdminSet123!",
+          },
         }),
       (error) => {
         assert.equal(error?.status, 400);
@@ -296,6 +304,7 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
         final_plan_type: "advanced",
         payment_mode: "online",
         transaction_id: "TX-123",
+        password: "AdminSet123!",
       },
     });
 
@@ -304,6 +313,11 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
     assert.equal(state.artistSubscriptions[0].approved_plan_type, "advanced");
     assert.equal(state.artistSubscriptions[0].payment_mode, "online");
     assert.equal(state.artistSubscriptions[0].transaction_id, "TX-123");
+    assert.equal(state.users.length, 1);
+    assert.equal(state.users[0].role, "artist");
+    assert.ok(state.users[0].password_hash);
+    const valid = await verifyPassword("AdminSet123!", state.users[0].password_hash);
+    assert.equal(valid, true);
   });
 
   test("approving premium while disabled returns 400", async () => {
@@ -320,6 +334,7 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
             final_plan_type: "premium",
             payment_mode: "online",
             transaction_id: "TX-PREMIUM",
+            password: "AdminSet123!",
           },
         }),
       (error) => {
@@ -340,6 +355,7 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
         final_plan_type: "advanced",
         payment_mode: "cash",
         transaction_id: "TX-1",
+        password: "AdminSet123!",
       },
     });
     assert.equal(first.httpStatus, 200);
@@ -352,9 +368,31 @@ describe("admin approval subscriptions", { concurrency: false }, () => {
         final_plan_type: "advanced",
         payment_mode: "cash",
         transaction_id: "TX-2",
+        password: "AdminSet123!",
       },
     });
     assert.equal(second.httpStatus, 409);
     assert.equal(state.artistSubscriptions.length, 1);
+  });
+
+  test("approving without password returns 400", async () => {
+    const { db } = createFakeDb({ requestedPlanType: "basic" });
+    const approveArtistRequestAction = loadActionWithDb(db);
+
+    await assert.rejects(
+      () =>
+        approveArtistRequestAction({
+          id: REQUEST_ID,
+          adminId: ADMIN_ID,
+          body: {
+            final_plan_type: "basic",
+          },
+        }),
+      (error) => {
+        assert.equal(error?.status, 400);
+        assert.match(String(error?.message || ""), /password/i);
+        return true;
+      }
+    );
   });
 });
