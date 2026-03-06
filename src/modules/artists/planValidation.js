@@ -19,6 +19,14 @@ const validateApprovalPayload = (payload = {}) => {
     throw createValidationError("final_plan_type is required");
   }
 
+  const password = trim(payload.password);
+  if (!password) {
+    throw createValidationError("password is required");
+  }
+  if (password.length < 8) {
+    throw createValidationError("password must be at least 8 characters");
+  }
+
   const finalPlanType = assertPlanAllowed(finalPlanTypeInput, {
     fieldName: "final_plan_type",
   });
@@ -28,6 +36,7 @@ const validateApprovalPayload = (payload = {}) => {
       final_plan_type: finalPlanType,
       payment_mode: "NA",
       transaction_id: "NA",
+      password,
     };
   }
 
@@ -53,6 +62,7 @@ const validateApprovalPayload = (payload = {}) => {
     final_plan_type: finalPlanType,
     payment_mode: paymentMode || "NA",
     transaction_id: transactionId || "NA",
+    password,
   };
 };
 

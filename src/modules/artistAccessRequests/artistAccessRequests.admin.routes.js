@@ -1,10 +1,9 @@
 ﻿const express = require("express");
-const { randomUUID, randomBytes } = require("crypto");
+const { randomUUID } = require("crypto");
 const { getDb } = require("../../core/db/db");
 const { requireAuth } = require("../../core/http/auth.middleware");
 const { requirePolicy } = require("../../core/http/policy.middleware");
 const { hashPassword } = require("../../utils/password");
-const { signToken } = require("../../utils/jwt");
 const { copyRequestProfilePhotoToArtist } = require("./artistAccessRequests.service");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 const { validateApprovalPayload } = require("../artists/planValidation");
@@ -132,7 +131,7 @@ const findUserByEmail = async (trx, email) => {
     .first("id", "email", "role");
 };
 
-const resolveOrCreateArtistUser = async (trx, email) => {
+const resolveOrCreateArtistUser = async (trx, email, plainPassword) => {
   const normalizedEmail = trim(email).toLowerCase();
   if (!normalizedEmail) {
     throw {
@@ -141,15 +140,24 @@ const resolveOrCreateArtistUser = async (trx, email) => {
       message: "email is required for approval",
     };
   }
+  if (!trim(plainPassword)) {
+    throw {
+      status: 400,
+      error: "validation_error",
+      message: "password is required for approval",
+    };
+  }
+  const passwordHash = await hashPassword(plainPassword);
 
   const existing = await findUserByEmail(trx, normalizedEmail);
   if (existing?.id) {
-    await trx("users").where({ id: existing.id }).update({ role: "artist" });
+    await trx("users").where({ id: existing.id }).update({
+      role: "artist",
+      password_hash: passwordHash,
+    });
     return { id: existing.id, email: existing.email || normalizedEmail, created: false };
   }
 
-  const tempPassword = randomBytes(18).toString("hex");
-  const passwordHash = await hashPassword(tempPassword);
   const id = randomUUID();
   await trx("users").insert({
     id,
@@ -248,20 +256,6 @@ const createArtistFromRequest = async (trx, request, userId) => {
   return artistRow;
 };
 
-const buildResetLink = (user) => {
-  const base =
-    process.env.FRONTEND_URL || process.env.CLIENT_URL || "http://localhost:5173";
-  const token = signToken(
-    {
-      sub: user.id,
-      email: user.email,
-      purpose: "password_reset",
-    },
-    { expiresIn: "24h" }
-  );
-  return `${String(base).replace(/\/$/, "")}/reset-password?token=${encodeURIComponent(token)}`;
-};
-
 const sendEmailOrLog = async ({ to, subject, text }) => {
   // No email provider wired yet in this repository. Log in development as fallback.
   if (process.env.NODE_ENV !== "production") {
@@ -273,11 +267,11 @@ const sendEmailOrLog = async ({ to, subject, text }) => {
   console.warn("[artist-request-email:missing-provider]", { to, subject });
 };
 
-const sendApprovalEmail = async ({ email, artistName, resetLink }) => {
+const sendApprovalEmail = async ({ email, artistName }) => {
   await sendEmailOrLog({
     to: email,
     subject: "Your artist onboarding request was approved",
-    text: `Hi ${artistName || "Artist"}, your request was approved. Set your password here: ${resetLink}`,
+    text: `Hi ${artistName || "Artist"}, your request was approved. You can now log in to the partner portal with your artist credentials.`,
   });
 };
 
@@ -361,7 +355,11 @@ const processApproval = async ({ id, adminId, approvalPayload }) => {
       };
     }
 
-    const user = await resolveOrCreateArtistUser(trx, requestEmail);
+    const user = await resolveOrCreateArtistUser(
+      trx,
+      requestEmail,
+      approvalPayload.password
+    );
     const artist = await createArtistFromRequest(trx, request, user.id);
     const photoLinkResult = await copyRequestProfilePhotoToArtist({
       db: getDb(),
@@ -624,11 +622,9 @@ ROUTER.post("/:id/approve", requireAuth, policy, async (req, res) => {
     }
     const result = approval.result;
 
-    const resetLink = buildResetLink(result.user);
     await sendApprovalEmail({
       email: result.email,
       artistName: result.artistName,
-      resetLink,
     });
 
     return res.status(200).json({

@@ -265,6 +265,9 @@ const ensurePaymentState = (res, expected) => {
   let pendingArtistRequestId;
   let pendingArtistRequestHandle;
   let pendingArtistRequestEmail;
+  let pendingRejectRequestHandle;
+  let pendingRejectRequestId;
+  let approvedArtistPassword;
   let adminLeadsBeforeArtistRequest = null;
   const stepResults = [];
   let labelSummaryBody;
@@ -2752,6 +2755,7 @@ const ensurePaymentState = (res, expected) => {
               message: "missing pending request id",
             };
           }
+          approvedArtistPassword = `AdminSet-${uniqueSuffix()}!`;
           const res = await req(
             "POST",
             `/api/admin/artist-access-requests/${pendingArtistRequestId}/approve`,
@@ -2759,6 +2763,7 @@ const ensurePaymentState = (res, expected) => {
               token: adminToken,
               json: {
                 final_plan_type: "basic",
+                password: approvedArtistPassword,
               },
             }
           );
@@ -2777,9 +2782,16 @@ const ensurePaymentState = (res, expected) => {
       );
 
       stepResults.push(
-        await runStep("Requestor re-login after approval", async () => {
-          const res = await req("POST", "/api/auth/login", {
-            json: { email: requestorEmail, password: requestorPassword },
+        await runStep("Approved artist can partner login with admin-set password", async () => {
+          if (!pendingArtistRequestEmail || !approvedArtistPassword) {
+            throw {
+              status: 500,
+              body: "",
+              message: "missing approved artist credentials",
+            };
+          }
+          const res = await req("POST", "/api/auth/partner/login", {
+            json: { email: pendingArtistRequestEmail, password: approvedArtistPassword },
           });
           if (res.status !== 200) {
             throwRes(res);
@@ -2791,8 +2803,95 @@ const ensurePaymentState = (res, expected) => {
               message: "missing accessToken after approval",
             };
           }
-          requestorToken = res.json.accessToken;
           return { status: res.status };
+        })
+      );
+
+      stepResults.push(
+        await runStep("Requestor submits second artist request for rejection", async () => {
+          const stamp = Date.now();
+          pendingRejectRequestHandle = `smoke-reject-${stamp}`;
+          const requestEmail = `smoke.reject.${stamp}@example.invalid`;
+          const phone = `998${String(stamp).slice(-7)}`;
+          const res = await req("POST", "/api/artist-access-requests", {
+            token: requestorToken,
+            json: {
+              artistName: `Smoke Reject ${stamp}`,
+              handle: pendingRejectRequestHandle,
+              requested_plan_type: "basic",
+              contactEmail: requestEmail,
+              phone,
+              pitch: "Smoke reject request",
+              socials: [],
+            },
+          });
+          if (res.status !== 201) {
+            throwRes(res);
+          }
+          return { status: res.status, body: res.bodyText };
+        })
+      );
+
+      stepResults.push(
+        await runStep("Admin finds second pending artist request", async () => {
+          const res = await req("GET", "/api/admin/artist-access-requests?status=pending", {
+            token: adminToken,
+          });
+          if (res.status !== 200) {
+            throwRes(res);
+          }
+          const items = Array.isArray(res.json?.items)
+            ? res.json.items
+            : Array.isArray(res.json)
+            ? res.json
+            : [];
+          const match = items.find(
+            (item) =>
+              item.handle &&
+              item.handle.toLowerCase() === pendingRejectRequestHandle?.toLowerCase()
+          );
+          if (!match?.id) {
+            throw {
+              status: res.status,
+              body: res.bodyText,
+              message: "pending reject request not found",
+            };
+          }
+          pendingRejectRequestId = match.id;
+          return { status: res.status, body: res.bodyText };
+        })
+      );
+
+      stepResults.push(
+        await runStep("Admin rejects artist request without approval password", async () => {
+          if (!pendingRejectRequestId) {
+            throw {
+              status: 500,
+              body: "",
+              message: "missing pending reject request id",
+            };
+          }
+          const res = await req(
+            "POST",
+            `/api/admin/artist-access-requests/${pendingRejectRequestId}/reject`,
+            {
+              token: adminToken,
+              json: {
+                comment: "Smoke reject validation",
+              },
+            }
+          );
+          if (res.status !== 200) {
+            throwRes(res);
+          }
+          if (res.json?.status !== "rejected") {
+            throw {
+              status: res.status,
+              body: res.bodyText,
+              message: "reject response invalid",
+            };
+          }
+          return { status: res.status, body: res.bodyText };
         })
       );
 

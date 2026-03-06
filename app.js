@@ -1,6 +1,7 @@
 require('module-alias/register');
 const express = require("express");
 const helmet = require("helmet");
+const cookieParser = require('cookie-parser');
 let cors;
 try {
   cors = require("cors");
@@ -31,6 +32,7 @@ const { UPLOADS_DIR } = require("./src/core/config/paths");
 const { getUploadRoot, getUploadDir, ensureUploadDir } = require("./src/core/config/uploadPaths");
 const { logRequest } = require("./src/core/http/logger");
 const { attachAuthUser } = require("./src/core/http/auth.middleware");
+const { requestId } = require("./src/core/http/requestId");
 const { ok, fail } = require("./src/core/http/errorResponse");
 
 const app = express();
@@ -38,6 +40,7 @@ const PORT = process.env.PORT || 3000;
 const BUILD_ID = process.env.BUILD_ID || new Date().toISOString();
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
+console.log("[env] NODE_ENV=", process.env.NODE_ENV, "isProduction=", isProduction);
 const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
 const devRoutesEnabledEnv = String(process.env.DEV_ROUTES_ENABLED || "").toLowerCase();
 const smokeSeedEnv = String(process.env.SMOKE_SEED || "").toLowerCase();
@@ -95,12 +98,14 @@ const defaultDevOrigins = [
   "http://localhost:4174",
   "http://127.0.0.1:4174",
 ];
+const requiredCorsOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
 
 const allowDevLocalhostDefaults = !isProduction && configuredCorsOrigins.length === 0;
 
 const allowedOrigins = new Set(
   [
     process.env.CLIENT_URL,
+    ...requiredCorsOrigins,
     ...configuredCorsOrigins,
     ...(allowDevLocalhostDefaults ? defaultDevOrigins : []),
   ].filter(Boolean)
@@ -120,15 +125,45 @@ const corsOptions = {
     }
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "If-None-Match"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "X-Request-ID",
+    "Cache-Control",
+    "If-None-Match",
+  ],
   credentials: true,
 };
 
-app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginEmbedderPolicy: false,
+  hsts: isProduction ? {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  } : false,
+}));
+app.use(cookieParser());
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
 if (cors) {
   app.use(cors(corsOptions));
+  app.options(/.*/, cors(corsOptions));
 }
 app.use("/uploads", express.static(UPLOADS_DIR));
 console.log("[static] uploads served from", UPLOADS_DIR);
@@ -138,6 +173,7 @@ if (!isProduction) {
   console.log("[uploads] products:", getUploadDir("products"));
 }
 app.use(attachAuthUser);
+app.use(requestId);
 app.use(logRequest);
 
 app.use((req, res, next) => {
@@ -235,6 +271,8 @@ const collectRouterDirectRoutes = (router) => {
 
 mountedRoutes.push("/api/auth");
 app.use("/api/auth", authRoutes);
+mountedRoutes.push("/auth");
+app.use("/auth", authRoutes);
 
 mountedRoutes.push("/api/admin/provisioning");
 app.use("/api/admin/provisioning", onboardingRoutes);

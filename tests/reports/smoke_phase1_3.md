@@ -1,5 +1,5 @@
 # Smoke Test Phase 1–3
-Generated: 2026-03-03T05:03:56.080Z
+Generated: 2026-03-06T02:51:30.775Z
 API Base: http://localhost:3000
 
 | Step | Result | Status | Notes |
@@ -12,7 +12,7 @@ API Base: http://localhost:3000
 | Buyer partner login rejected | PASS | 401 |  |
 | Register smoke requester | PASS | 200 |  |
 | Requestor submits artist request | PASS | 201 |  |
-| Artist request does not create lead | PASS | 200 | lead count unchanged (31) |
+| Artist request does not create lead | PASS | 200 | lead count unchanged (62) |
 | Buyer probe forbidden (403) | PASS | 403 |  |
 | Label login | PASS | 200 |  |
 | Label partner login | PASS | 200 |  |
@@ -95,7 +95,10 @@ API Base: http://localhost:3000
 | Label dashboard orders | PASS | 200 |  |
 | Admin finds pending artist request | PASS | 200 |  |
 | Admin approves artist request | PASS | 200 |  |
-| Requestor re-login after approval | PASS | 200 |  |
+| Approved artist can partner login with admin-set password | PASS | 200 |  |
+| Requestor submits second artist request for rejection | PASS | 201 |  |
+| Admin finds second pending artist request | PASS | 200 |  |
+| Admin rejects artist request without approval password | PASS | 200 |  |
 | Buyer cannot access label orders | PASS | 403 |  |
 | Artist cannot access label orders | PASS | 403 |  |
 | Admin cannot access label orders | PASS | 403 |  |

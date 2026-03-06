@@ -8,6 +8,7 @@ const logRequest = (req, res, next) => {
       timestamp: new Date().toISOString(),
       method: req.method,
       path: req.originalUrl,
+      requestId: req.id,
       status: res.statusCode,
       durationMs: Number(durationMs.toFixed(2)),
       user: req.user?.id || "anonymous",
