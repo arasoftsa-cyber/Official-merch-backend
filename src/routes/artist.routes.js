@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { getArtist, getShelf, getArtists, getFeaturedArtists } = require("./artist.controller");
+const { getArtist, getShelf, getArtists, getFeaturedArtists } = require("../controllers/artist.controller");
 
 router.get("/featured", getFeaturedArtists);
 router.get("/", getArtists);

@@ -1,5 +1,5 @@
-const { getDb } = require("../../core/db/db");
-const { toSafeDto } = require("./user.model");
+const { getDb } = require("../core/db/db");
+const { toSafeDto } = require("../utils/user.model");
 const { randomUUID } = require("crypto");
 
 const createUser = async ({ email, passwordHash, role }) => {

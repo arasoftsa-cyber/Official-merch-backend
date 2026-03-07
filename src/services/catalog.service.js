@@ -1,9 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../core/db/db");
-const { getUploadDir, ensureUploadDir } = require("../../core/config/uploadPaths");
-const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const { getDb } = require("../core/db/db");
+const { getUploadDir, ensureUploadDir } = require("../core/config/uploadPaths");
+const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 
 const PRODUCT_UPLOAD_DIR = getUploadDir("products");
 const ALLOWED_PRODUCT_COLORS = new Set([

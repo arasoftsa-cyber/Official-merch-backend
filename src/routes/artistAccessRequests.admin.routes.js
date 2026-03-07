@@ -1,13 +1,13 @@
 ﻿const express = require("express");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../core/db/db");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
-const { hashPassword } = require("../../utils/password");
-const { copyRequestProfilePhotoToArtist } = require("./artistAccessRequests.service");
-const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
-const { validateApprovalPayload } = require("../artists/planValidation");
-const { PLAN_TYPES, PLAN_TYPE_VALUES, normalizePlan } = require("../artists/planTypes");
+const { getDb } = require("../core/db/db");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
+const { hashPassword } = require("../utils/password");
+const { copyRequestProfilePhotoToArtist } = require("../services/artistAccessRequests.service");
+const { toAbsolutePublicUrl } = require("../utils/publicUrl");
+// const { validateApprovalPayload } = require("../services/planValidation");
+const { PLAN_TYPES, PLAN_TYPE_VALUES, normalizePlan } = require("../common/constants");
 
 const ROUTER = express.Router();
 const STATUS_OPTIONS = new Set(["pending", "approved", "rejected"]);

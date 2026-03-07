@@ -11,9 +11,9 @@ const {
   replaceProductListingPhotos,
   loadProductListingPhotos,
   attachListingPhotosToProducts,
-} = require("./catalog.service");
+} = require("../services/catalog.service");
 
-const { getDb } = require("../../core/db/db");
+const { getDb } = require("../core/db/db");
 
 const BAD_REQUEST = { error: "bad_request" };
 const NOT_FOUND = { error: "product_not_found" };

@@ -1,15 +1,15 @@
 const express = require("express");
 const router = express.Router();
 
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
 const {
   linkArtistUser,
   linkLabelArtist,
   unlinkLabelArtist,
   createArtist,
   createLabel,
-} = require("./onboarding.controller");
+} = require("../controllers/onboarding.controller");
 
 const ADMIN_POLICY = requirePolicy("admin:ownership:write", "system");
 const DOMAIN_POLICY = requirePolicy("admin:domain:write", "system");

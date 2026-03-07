@@ -1,12 +1,12 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
 const { z } = require("zod");
-const { getDb } = require("../../core/db/db");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { ok, fail } = require("../../core/http/errorResponse");
-const rateLimit = require("../../core/http/rateLimit");
-const { orderSpamGuard } = require("../../core/http/spamDetection");
-const { startPaymentForOrder, confirmAttempt } = require("../payments/payments.api");
+const { getDb } = require("../core/db/db");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { ok, fail } = require("../core/http/errorResponse");
+const rateLimit = require("../core/http/rateLimit");
+const { orderSpamGuard } = require("../core/http/spamDetection");
+const { startPaymentForOrder, confirmAttempt } = require("../core/payments/paymentService");
 
 const router = express.Router();
 

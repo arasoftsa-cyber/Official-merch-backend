@@ -1,5 +1,5 @@
 const express = require("express");
-const { getHomepageBanners } = require("./homepage.controller");
+const { getHomepageBanners } = require("../controllers/homepage.controller");
 
 const router = express.Router();
 

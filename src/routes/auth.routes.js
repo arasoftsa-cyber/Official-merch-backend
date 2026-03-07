@@ -1,11 +1,11 @@
 const express = require("express");
 const router = express.Router();
 
-const rateLimit = require("../../core/http/rateLimit");
-const { ok } = require("../../core/http/errorResponse");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
-const { ping, login, fanLogin, partnerLogin, register, refresh, logout } = require("./auth.controller");
+const rateLimit = require("../core/http/rateLimit");
+const { ok } = require("../core/http/errorResponse");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
+const { ping, login, fanLogin, partnerLogin, register, refresh, logout } = require("../controllers/auth.controller");
 
 const isProd = process.env.NODE_ENV === "production";
 const loginRateLimiter = rateLimit({

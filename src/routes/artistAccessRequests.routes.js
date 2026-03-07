@@ -1,5 +1,5 @@
 const express = require("express");
-const { trim, submitArtistAccessRequest, checkArtistAccessAvailability } = require("./artistAccessRequests.service");
+const { trim, submitArtistAccessRequest, checkArtistAccessAvailability } = require("../services/artistAccessRequests.service");
 
 const router = express.Router();
 const MAX_MULTIPART_BYTES = 2 * 1024 * 1024;

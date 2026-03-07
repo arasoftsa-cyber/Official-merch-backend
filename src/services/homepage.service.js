@@ -1,12 +1,12 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../core/db/db");
-const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const { getDb } = require("../core/db/db");
+const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 const {
   HOMEPAGE_ENTITY_TYPE,
   HOMEPAGE_ENTITY_ID,
   ROLE_HERO_CAROUSEL,
   DEFAULT_HOMEPAGE_BANNER_SORT_ORDER,
-} = require("./homepage.constants");
+} = require("../common/constants");
 
 const HOMEPAGE_BANNER_SELECT = [
   "eml.id as link_id",

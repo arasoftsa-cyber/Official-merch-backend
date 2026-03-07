@@ -1,13 +1,13 @@
 const express = require("express");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
 const {
   getHomepageBanners,
   createHomepageBannerHandler,
   patchHomepageBannerHandler,
   deleteHomepageBannerHandler,
   uploadHomepageBannerHandler,
-} = require("./homepage.controller");
+} = require("../controllers/homepage.controller");
 
 const router = express.Router();
 const requireAdminRead = requirePolicy("admin_dashboard:read", "homepage_banners");

@@ -1,9 +1,9 @@
 const express = require("express");
 const router = express.Router();
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
-const { getDb } = require("../../core/db/db");
-const { doesUserOwnLabel } = require("../../utils/ownership");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
+const { getDb } = require("../core/db/db");
+const { doesUserOwnLabel } = require("../utils/ownership");
 
 const ctxBuilder = async (req) => {
   const db = getDb();

@@ -1,4 +1,4 @@
-const { getDb } = require("../../core/db/db");
+const { getDb } = require("../core/db/db");
 
 const ZERO_SUMMARY = {
   totalArtists: 0,

@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../core/db/db");
+const { getDb } = require("../core/db/db");
 
 const BAD_REQUEST = { error: "bad_request" };
 

@@ -1,5 +1,5 @@
 const express = require("express");
-const { postLead } = require("./lead.controller");
+const { postLead } = require("../controllers/lead.controller");
 
 const router = express.Router();
 

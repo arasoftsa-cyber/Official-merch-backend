@@ -1,6 +1,6 @@
 "use strict";
 
-const { hashPassword, verifyPassword } = require("../../utils/password");
+const { hashPassword, verifyPassword } = require("../utils/password");
 const { getDb } = require("../core/db/db");
 const { ok, fail } = require("../core/http/errorResponse");
 const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLockoutTime } = require("../core/http/accountLockout");

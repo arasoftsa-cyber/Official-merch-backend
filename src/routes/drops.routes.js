@@ -2,14 +2,14 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../../core/db/db");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
-const { ensureUploadDir } = require("../../core/config/uploadPaths");
+const { getDb } = require("../core/db/db");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
+const { ensureUploadDir } = require("../core/config/uploadPaths");
 const {
   isUserLinkedToArtist,
   isLabelLinkedToArtist,
-} = require("../../utils/ownership");
+} = require("../utils/ownership");
 
 const router = express.Router();
 

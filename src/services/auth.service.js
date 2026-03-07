@@ -1,8 +1,8 @@
 "use strict";
 
 const { createHash, randomUUID } = require("crypto");
-const { getDb } = require("../../core/db/db");
-const { signAccessToken, signRefreshToken, verifyRefreshToken } = require("../../utils/jwt");
+const { getDb } = require("../core/db/db");
+const { signAccessToken, signRefreshToken, verifyRefreshToken } = require("../utils/jwt");
 
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const INVALID_REFRESH_TOKEN_CODE = "INVALID_REFRESH_TOKEN";

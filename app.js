@@ -9,12 +9,45 @@ const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
 const router = require("./src/routes/index");
+const cookieParser = require("cookie-parser");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
 
-app.use(cors());
+app.use(cookieParser());
+// 1. Define your allowed domains
+const allowedOrigins = [
+    'http://localhost:5173',
+    process.env.CORS_ORIGINS,
+];
+
+// 2. Configure CORS options
+const corsOptions = {
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "X-Request-ID",
+    "Cache-Control",
+    "If-None-Match",
+  ],
+  credentials: true,
+};
+
+// 3. Apply the middleware
+app.use(cors(corsOptions));
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {

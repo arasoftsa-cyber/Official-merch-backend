@@ -1,7 +1,7 @@
 const express = require("express");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
-const { getDb } = require("../../core/db/db");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
+const { getDb } = require("../core/db/db");
 
 const FORBIDDEN = { error: "forbidden" };
 const router = express.Router();
@@ -13,8 +13,8 @@ const {
   resolveLabelIdForUser,
   createEmptyDashboardPayload,
   clampOrderLimit,
-} = require("./dashboard.service");
-const { isLabelLinkedToArtist } = require("../../utils/ownership");
+} = require("../services/dashboard.service");
+const { isLabelLinkedToArtist } = require("../utils/ownership");
 
 const ensureLabel = (req, res, next) => {
   if (req.user?.role !== "label") {

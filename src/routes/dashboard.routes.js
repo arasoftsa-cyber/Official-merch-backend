@@ -1,12 +1,12 @@
 const express = require("express");
-const { requireAuth } = require("../../core/http/auth.middleware");
-const { requirePolicy } = require("../../core/http/policy.middleware");
+const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
 const {
   getArtistDashboardSummary,
   getArtistDashboardOrders,
   getArtistDashboardOrderDetail,
-} = require("./dashboard.service");
-const { getDb } = require("../../core/db/db");
+} = require("../services/dashboard.service");
+const { getDb } = require("../core/db/db");
 
 const router = express.Router();
 
