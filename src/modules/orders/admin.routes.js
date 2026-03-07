@@ -267,25 +267,54 @@ const ensureProductVariantForSeed = async (db, artistId, minStock) => {
     .where({ product_id: product.id })
     .first();
   if (!variant) {
+    const [skuRow] = await db("inventory_skus")
+      .insert({
+        id: randomUUID(),
+        supplier_sku: `SMOKE-SKU-${Date.now()}`,
+        merch_type: "default",
+        quality_tier: null,
+        size: "OS",
+        color: "Black",
+        stock: minStock,
+        is_active: true,
+        metadata: db.raw("?::jsonb", [JSON.stringify({ source: "admin.seed_orders" })]),
+        created_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      })
+      .returning(["id"]);
     const variantId = randomUUID();
     await db("product_variants").insert({
       id: variantId,
       product_id: product.id,
+      inventory_sku_id: skuRow?.id || null,
       sku: `SMOKE-${Date.now()}`,
       size: "OS",
       color: "Black",
       price_cents: 4200,
+      selling_price_cents: 4200,
+      is_listed: true,
       stock: minStock,
       created_at: db.fn.now(),
+      updated_at: db.fn.now(),
     });
     variant = await db("product_variants")
       .where({ id: variantId })
       .first();
   }
-  const desiredStock = Math.max(minStock, variant.stock ?? 0);
-  await db("product_variants")
-    .where({ id: variant.id })
-    .update({ stock: desiredStock + 10 });
+  const inventorySkuId = variant.inventory_sku_id;
+  if (!inventorySkuId) {
+    throw new Error("seed_variant_missing_inventory_sku");
+  }
+  const skuRow = await db("inventory_skus").where({ id: inventorySkuId }).first();
+  const desiredStock = Math.max(minStock, Number(skuRow?.stock ?? 0));
+  await db("inventory_skus")
+    .where({ id: inventorySkuId })
+    .update({
+      stock: desiredStock + 10,
+      is_active: true,
+      updated_at: db.fn.now(),
+    });
+  variant = await db("product_variants").where({ id: variant.id }).first();
   return variant;
 };
 
@@ -326,19 +355,22 @@ router.post(
             id: orderId,
             buyer_user_id: TEST_BUYER_ID,
             status: "placed",
-            total_cents: variant.price_cents,
+            total_cents: variant.selling_price_cents ?? variant.price_cents,
             created_at: now,
             updated_at: now,
           });
-          await trx("product_variants")
-            .where({ id: variant.id })
-            .decrement("stock", 1);
+          await trx("inventory_skus")
+            .where({ id: variant.inventory_sku_id })
+            .update({
+              stock: trx.raw("stock - 1"),
+              updated_at: now,
+            });
           await trx("payments").insert({
             id: randomUUID(),
             order_id: orderId,
             status: idx < paidCount ? "paid" : "unpaid",
             provider: "mock",
-            amount_cents: variant.price_cents,
+            amount_cents: variant.selling_price_cents ?? variant.price_cents,
             currency: "USD",
             created_at: now,
             updated_at: now,
@@ -349,7 +381,7 @@ router.post(
             product_id: variant.product_id,
             product_variant_id: variant.id,
             quantity: 1,
-            price_cents: variant.price_cents,
+            price_cents: variant.selling_price_cents ?? variant.price_cents,
             created_at: now,
           });
           await trx("order_events").insert({

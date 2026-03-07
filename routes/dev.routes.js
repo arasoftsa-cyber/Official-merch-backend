@@ -199,10 +199,20 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
   const ARTIST_HANDLE = "ui-smoke-catalog-artist";
   const ARTIST_NAME = "UI Smoke Catalog Artist";
   const VARIANT_SKU = "UI-SMOKE-SKU-1";
+  const SUPPLIER_SKU = "UI-SMOKE-SUPPLIER-SKU-1";
 
   try {
     const db = getDb();
     const result = await db.transaction(async (trx) => {
+      const [variantColumns, skuColumns] = await Promise.all([
+        trx("product_variants").columnInfo(),
+        trx("inventory_skus").columnInfo(),
+      ]);
+      const hasVariantColumn = (name) =>
+        Object.prototype.hasOwnProperty.call(variantColumns, name);
+      const hasSkuColumn = (name) =>
+        Object.prototype.hasOwnProperty.call(skuColumns, name);
+
       let artist = await trx("artists").where({ handle: ARTIST_HANDLE }).first("id", "handle", "name");
       if (!artist) {
         const [createdArtist] = await trx("artists")
@@ -243,50 +253,135 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
         product = updatedProduct || product;
       }
 
+      const skuSelect = ["id", "supplier_sku", "merch_type", "size", "color", "stock", "is_active"];
+      let inventorySku = await trx("inventory_skus")
+        .where({ supplier_sku: SUPPLIER_SKU })
+        .first(...skuSelect);
+
+      if (!inventorySku) {
+        const skuInsert = {
+          id: randomUUID(),
+          supplier_sku: SUPPLIER_SKU,
+          merch_type: "tshirt",
+          quality_tier: "standard",
+          size: "M",
+          color: "Black",
+          stock: 12,
+          is_active: true,
+          metadata: trx.raw("?::jsonb", [JSON.stringify({ source: "dev.seed_ui_smoke_product" })]),
+          created_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        };
+        if (hasSkuColumn("mrp_cents")) {
+          skuInsert.mrp_cents = 1999;
+        }
+        const [createdSku] = await trx("inventory_skus")
+          .insert(skuInsert)
+          .returning(skuSelect);
+        inventorySku = createdSku;
+      } else {
+        const [updatedSku] = await trx("inventory_skus")
+          .where({ id: inventorySku.id })
+          .update({
+            merch_type: "tshirt",
+            quality_tier: "standard",
+            size: "M",
+            color: "Black",
+            is_active: true,
+            stock: trx.raw("GREATEST(stock, 12)"),
+            updated_at: trx.fn.now(),
+          })
+          .returning(skuSelect);
+        inventorySku = updatedSku || inventorySku;
+      }
+
+      const variantSelect = ["id", "product_id", "sku", "size", "color"];
+      if (hasVariantColumn("price_cents")) variantSelect.push("price_cents");
+      if (hasVariantColumn("selling_price_cents")) variantSelect.push("selling_price_cents");
+      if (hasVariantColumn("stock")) variantSelect.push("stock");
+      if (hasVariantColumn("inventory_sku_id")) variantSelect.push("inventory_sku_id");
+
       let variant = await trx("product_variants")
         .where({ sku: VARIANT_SKU })
-        .first("id", "product_id", "sku", "size", "color", "price_cents", "stock");
+        .first(...variantSelect);
 
       if (!variant) {
+        const variantInsert = {
+          id: randomUUID(),
+          product_id: product.id,
+          sku: VARIANT_SKU,
+          size: "M",
+          color: "Black",
+          price_cents: 1999,
+          created_at: trx.fn.now(),
+        };
+        if (hasVariantColumn("stock")) {
+          // Compatibility mirror only; source of truth is inventory_skus.stock.
+          variantInsert.stock = 12;
+        }
+        if (hasVariantColumn("inventory_sku_id")) {
+          variantInsert.inventory_sku_id = inventorySku.id;
+        }
+        if (hasVariantColumn("selling_price_cents")) {
+          variantInsert.selling_price_cents = 1999;
+        }
+        if (hasVariantColumn("is_listed")) {
+          variantInsert.is_listed = true;
+        }
+        if (hasVariantColumn("updated_at")) {
+          variantInsert.updated_at = trx.fn.now();
+        }
+
         const [createdVariant] = await trx("product_variants")
-          .insert({
-            id: randomUUID(),
-            product_id: product.id,
-            sku: VARIANT_SKU,
-            size: "M",
-            color: "Black",
-            price_cents: 1999,
-            stock: 10,
-            created_at: trx.fn.now(),
-          })
-          .returning(["id", "product_id", "sku", "size", "color", "price_cents", "stock"]);
+          .insert(variantInsert)
+          .returning(variantSelect);
         variant = createdVariant;
       } else {
+        const variantUpdate = {
+          product_id: product.id,
+          size: "M",
+          color: "Black",
+          price_cents: 1999,
+        };
+        if (hasVariantColumn("stock")) {
+          // Compatibility mirror only; source of truth is inventory_skus.stock.
+          variantUpdate.stock = trx.raw("GREATEST(stock, 12)");
+        }
+        if (hasVariantColumn("inventory_sku_id")) {
+          variantUpdate.inventory_sku_id = inventorySku.id;
+        }
+        if (hasVariantColumn("selling_price_cents")) {
+          variantUpdate.selling_price_cents = 1999;
+        }
+        if (hasVariantColumn("is_listed")) {
+          variantUpdate.is_listed = true;
+        }
+        if (hasVariantColumn("updated_at")) {
+          variantUpdate.updated_at = trx.fn.now();
+        }
+
         const [updatedVariant] = await trx("product_variants")
           .where({ id: variant.id })
-          .update({
-            product_id: product.id,
-            size: "M",
-            color: "Black",
-            price_cents: 1999,
-            stock: trx.raw("GREATEST(stock, 10)"),
-          })
-          .returning(["id", "product_id", "sku", "size", "color", "price_cents", "stock"]);
+          .update(variantUpdate)
+          .returning(variantSelect);
         variant = updatedVariant || variant;
       }
 
-      return { artist, product, variant };
+      return { artist, product, variant, inventorySku };
     });
 
     console.log(
-      `[ui-smoke-seed] productId=${result.product.id} sku=${result.variant.sku}`
+      `[ui-smoke-seed] productId=${result.product.id} sku=${result.variant.sku} supplierSku=${result.inventorySku?.supplier_sku || ""}`
     );
     return ok(res, {
       ok: true,
       productId: result.product.id,
       sku: result.variant.sku,
+      inventorySkuId: result.inventorySku?.id || null,
+      supplierSku: result.inventorySku?.supplier_sku || null,
       product: result.product,
       variant: result.variant,
+      inventorySku: result.inventorySku || null,
     });
   } catch (err) {
     next(err);

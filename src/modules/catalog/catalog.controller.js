@@ -12,16 +12,23 @@ const {
   loadProductListingPhotos,
   attachListingPhotosToProducts,
 } = require("./catalog.service");
+const {
+  buildSellableMinPriceSubquery,
+  buildVariantInventoryQuery,
+  formatVariantInventoryRow,
+} = require("./variantAvailability");
+const { resolveOurShareCents } = require("./economics");
 
 const { getDb } = require("../../core/db/db");
 
 const BAD_REQUEST = { error: "bad_request" };
 const NOT_FOUND = { error: "product_not_found" };
 const DEFAULT_VARIANT_SKU = "DEFAULT";
-const DEFAULT_VARIANT_STOCK = 10;
+const DEFAULT_VARIANT_STOCK = 0;
 const DEFAULT_VARIANT_SIZE = "M";
 const DEFAULT_VARIANT_COLOR = "default";
 const MAX_MULTIPART_BYTES = 15 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const parseContentDisposition = (line) => {
   const nameMatch = line.match(/name="([^"]+)"/i);
@@ -201,6 +208,19 @@ const withStatus = (product = {}) => ({
     product?.is_active === false || product?.isActive === false ? "inactive" : "active",
 });
 
+const parseNonNegativeInt = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+};
+
+const asUuidOrNull = (value) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  return UUID_RE.test(normalized) ? normalized : null;
+};
+
 const listProducts = async (req, res) => {
   const baseItems = isAdmin(req.user) ? await getAdminProducts() : await getActiveProducts();
   const items = (await attachListingPhotosToProducts(baseItems)).map(withStatus);
@@ -222,7 +242,7 @@ const listArtistProducts = async (req, res) => {
     return res.json({ items: [] });
   }
 
-  const items = await db("products")
+  const artistProductsQuery = db("products")
     .select(
       "id",
       "title",
@@ -233,12 +253,11 @@ const listArtistProducts = async (req, res) => {
       "is_active",
       "is_active as isActive",
       db.raw("is_active as active"),
-      db.raw(
-        "(select min(price_cents) from product_variants v where v.product_id = products.id) as minVariantPriceCents"
-      )
+      buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
     )
     .where({ artist_id: mapping.artist_id })
     .orderBy("created_at", "desc");
+  const items = await artistProductsQuery;
 
   return res.json({ items });
 };
@@ -251,7 +270,15 @@ const getProduct = async (req, res) => {
   }
   const { product, variants } = row;
   const listingPhotoUrls = await loadProductListingPhotos(id);
-  const prices = (Array.isArray(variants) ? variants : [])
+  const isAdminView = isAdmin(req.user);
+  if (!isAdminView && product?.is_active === false) {
+    return res.status(404).json(NOT_FOUND);
+  }
+  const allVariants = Array.isArray(variants) ? variants : [];
+  const sellableVariants = allVariants.filter((variant) => Boolean(variant?.effectiveSellable));
+  const responseVariants = allVariants;
+  const pricingSource = sellableVariants.length > 0 ? sellableVariants : responseVariants;
+  const prices = pricingSource
     .map((variant) => Number(variant?.priceCents))
     .filter((value) => Number.isFinite(value));
   const minVariantPriceCents = prices.length ? Math.min(...prices) : null;
@@ -280,7 +307,7 @@ const getProduct = async (req, res) => {
     photoUrls: photos,
     photos,
     primaryPhotoUrl,
-    variants,
+    variants: responseVariants,
   });
 };
 
@@ -326,7 +353,8 @@ const createProduct = async (req, res) => {
       merchName,
       merchStory,
       mrpCents,
-      vendorPayCents,
+      sellingPriceCents,
+      vendorPayoutCents,
       ourShareCents,
       royaltyCents,
       merchType,
@@ -343,7 +371,12 @@ const createProduct = async (req, res) => {
           return { validationError: { field: "artist_id", message: "artist_id does not exist" } };
         }
 
-        const productColumns = await trx("products").columnInfo();
+        const [productColumns, variantColumns] = await Promise.all([
+          trx("products").columnInfo(),
+          trx("product_variants").columnInfo(),
+        ]);
+        const hasVariantColumn = (name) =>
+          Object.prototype.hasOwnProperty.call(variantColumns, name);
         const insertPayload = {
           artist_id: artistId,
           title: merchName,
@@ -358,11 +391,11 @@ const createProduct = async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(productColumns, "mrp_cents")) {
           insertPayload.mrp_cents = mrpCents;
         }
-        if (Object.prototype.hasOwnProperty.call(productColumns, "vendor_pay_cents")) {
-          insertPayload.vendor_pay_cents = vendorPayCents;
-        }
         if (Object.prototype.hasOwnProperty.call(productColumns, "vendor_payout_cents")) {
-          insertPayload.vendor_payout_cents = vendorPayCents;
+          insertPayload.vendor_payout_cents = vendorPayoutCents;
+        }
+        if (Object.prototype.hasOwnProperty.call(productColumns, "selling_price_cents")) {
+          insertPayload.selling_price_cents = sellingPriceCents;
         }
         if (Object.prototype.hasOwnProperty.call(productColumns, "our_share_cents")) {
           insertPayload.our_share_cents = ourShareCents;
@@ -382,16 +415,55 @@ const createProduct = async (req, res) => {
           .returning(["id", "created_at"]);
 
         const defaultVariantPrice =
-          Number.isInteger(mrpCents) && mrpCents >= 0 ? mrpCents : 0;
-        await trx("product_variants").insert({
+          Number.isInteger(sellingPriceCents) && sellingPriceCents >= 0
+            ? sellingPriceCents
+            : Number.isInteger(mrpCents) && mrpCents >= 0
+            ? mrpCents
+            : 0;
+        const defaultVariantIsListed = defaultVariantPrice > 0;
+        const [skuRow] = await trx("inventory_skus")
+          .insert({
+            supplier_sku: `NEWMERCH-${String(productRow.id).slice(0, 8)}-DEFAULT`,
+            merch_type: merchType || "default",
+            quality_tier: null,
+            size: "default",
+            color: "default",
+            stock: 0,
+            is_active: true,
+            metadata: trx.raw(
+              "?::jsonb",
+              [JSON.stringify({ source: "catalog.controller.createProduct.new_merch" })]
+            ),
+            created_at: trx.fn.now(),
+            updated_at: trx.fn.now(),
+          })
+          .returning(["id"]);
+
+        const variantInsert = {
           product_id: productRow.id,
           sku: buildDefaultVariantSku(productRow.id),
           size: "default",
           color: "default",
           price_cents: defaultVariantPrice,
-          stock: 0,
           created_at: trx.fn.now(),
-        });
+        };
+        if (hasVariantColumn("inventory_sku_id")) variantInsert.inventory_sku_id = skuRow?.id || null;
+        if (hasVariantColumn("selling_price_cents")) {
+          variantInsert.selling_price_cents = defaultVariantPrice;
+        }
+        if (hasVariantColumn("vendor_payout_cents")) {
+          variantInsert.vendor_payout_cents = vendorPayoutCents;
+        }
+        if (hasVariantColumn("royalty_cents")) {
+          variantInsert.royalty_cents = royaltyCents;
+        }
+        if (hasVariantColumn("our_share_cents")) {
+          variantInsert.our_share_cents = ourShareCents;
+        }
+        if (hasVariantColumn("is_listed")) variantInsert.is_listed = defaultVariantIsListed;
+        if (hasVariantColumn("stock")) variantInsert.stock = 0;
+        if (hasVariantColumn("updated_at")) variantInsert.updated_at = trx.fn.now();
+        await trx("product_variants").insert(variantInsert);
 
         let listingPhotoUrls = [];
         if (Array.isArray(listingFiles) && listingFiles.length > 0) {
@@ -463,6 +535,10 @@ const createProduct = async (req, res) => {
     size: bodySize,
     color: bodyColor,
     sku: bodySku,
+    inventorySkuId: bodyInventorySkuId,
+    inventory_sku_id: bodyInventorySkuIdSnake,
+    supplierSku: bodySupplierSku,
+    supplier_sku: bodySupplierSkuSnake,
   } = body;
   if (!title || typeof title !== "string") {
     return res.status(400).json(BAD_REQUEST);
@@ -529,6 +605,16 @@ const createProduct = async (req, res) => {
     return res.status(400).json(BAD_REQUEST);
   }
 
+  const rawInventorySkuId =
+    variantInput?.inventorySkuId ??
+    variantInput?.inventory_sku_id ??
+    bodyInventorySkuId ??
+    bodyInventorySkuIdSnake;
+  const inventorySkuIdFromPayload = asUuidOrNull(rawInventorySkuId);
+  if (rawInventorySkuId && !inventorySkuIdFromPayload) {
+    return res.status(400).json({ error: "invalid_inventory_sku_id" });
+  }
+
   const isActiveFlag =
     typeof isActive === "boolean"
       ? isActive
@@ -538,63 +624,263 @@ const createProduct = async (req, res) => {
       ? true
       : true;
   const db = getDb();
-  const [productRow] = await db("products")
-    .insert({
-      artist_id: artistId,
-      title,
-      description: description || null,
-      is_active: isActiveFlag,
-      created_at: db.fn.now(),
-    })
-    .returning(["id", "title", "description", "is_active as isActive"]);
-
-  if (!productRow) {
-    return res.status(500).json({ error: "internal_server_error" });
-  }
-
-  const skuCandidate = variantInput?.sku ?? bodySku;
-  const sanitizedSku = sanitizeSkuSegment(skuCandidate);
-  const baseSku =
-    sanitizedSku ||
-    buildDefaultSku(productRow.id, normalizedSize, normalizedColor) ||
-    DEFAULT_VARIANT_SKU;
-
-  const randomSuffix = () => Math.random().toString(36).slice(2, 6).toUpperCase();
+  let productRow = null;
   let variantRow = null;
-  let attempt = 0;
-  while (attempt < 3 && !variantRow) {
-    const sku = `${baseSku}${attempt ? `-${randomSuffix()}` : ''}`;
-    try {
-      const [inserted] = await db("product_variants")
-        .insert({
-          product_id: productRow.id,
-          sku,
-          size: normalizedSize,
-          color: normalizedColor,
-          price_cents: priceResult.priceCents,
-          stock: variantStock,
-          created_at: db.fn.now(),
-        })
-        .returning([
-          "id",
-          "sku",
-          "size",
-          "color",
-          "price_cents as priceCents",
-          "stock",
-        ]);
-      variantRow = inserted;
-    } catch (err) {
-      if (err?.code === "23505" || err?.message?.includes("duplicate key")) {
-        attempt += 1;
-        continue;
-      }
-      throw err;
-    }
-  }
 
-  if (!variantRow) {
-    return res.status(500).json({ error: "internal_server_error", message: "variant_sku_conflict" });
+  try {
+    const created = await db.transaction(async (trx) => {
+      const [variantColumns, skuColumns] = await Promise.all([
+        trx("product_variants").columnInfo(),
+        trx("inventory_skus").columnInfo(),
+      ]);
+      const hasVariantColumn = (name) =>
+        Object.prototype.hasOwnProperty.call(variantColumns, name);
+      const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
+
+      const [insertedProduct] = await trx("products")
+        .insert({
+          artist_id: artistId,
+          title,
+          description: description || null,
+          is_active: isActiveFlag,
+          created_at: trx.fn.now(),
+        })
+        .returning(["id", "title", "description", "is_active as isActive"]);
+
+      if (!insertedProduct) {
+        throw Object.assign(new Error("product_create_failed"), { code: "PRODUCT_CREATE_FAILED" });
+      }
+
+      const skuCandidate = variantInput?.sku ?? bodySku;
+      const sanitizedSku = sanitizeSkuSegment(skuCandidate);
+      const baseSku =
+        sanitizedSku ||
+        buildDefaultSku(insertedProduct.id, normalizedSize, normalizedColor) ||
+        DEFAULT_VARIANT_SKU;
+      const randomSuffix = () => Math.random().toString(36).slice(2, 6).toUpperCase();
+
+      let resolvedInventorySkuId = inventorySkuIdFromPayload;
+      if (resolvedInventorySkuId) {
+        const existingSku = await trx("inventory_skus")
+          .select("id")
+          .where({ id: resolvedInventorySkuId })
+          .first();
+        if (!existingSku) {
+          throw Object.assign(new Error("inventory_sku_not_found"), { code: "INVENTORY_SKU_NOT_FOUND" });
+        }
+      } else {
+        const merchType =
+          String(
+            variantInput?.merchType ??
+              variantInput?.merch_type ??
+              body.merchType ??
+              body.merch_type ??
+              "default"
+          ).trim() || "default";
+        const suppliedSupplierSku =
+          String(
+            variantInput?.supplierSku ??
+              variantInput?.supplier_sku ??
+              bodySupplierSku ??
+              bodySupplierSkuSnake ??
+              ""
+          ).trim() || "";
+        const supplierSkuBase =
+          suppliedSupplierSku ||
+          `CATALOG-${String(insertedProduct.id).slice(0, 8)}-${normalizedColor}-${normalizedSize}`;
+        let supplierSkuAttempt = supplierSkuBase;
+        let supplierSkuAttempts = 0;
+
+        while (supplierSkuAttempts < 4 && !resolvedInventorySkuId) {
+          try {
+            const skuInsert = {
+              supplier_sku: supplierSkuAttempt,
+              merch_type: merchType,
+              quality_tier:
+                variantInput?.qualityTier ??
+                variantInput?.quality_tier ??
+                body.qualityTier ??
+                body.quality_tier ??
+                null,
+              size: normalizedSize,
+              color: normalizedColor,
+              stock: variantStock,
+              is_active: true,
+              metadata: trx.raw(
+                "?::jsonb",
+                [JSON.stringify({ source: "catalog.controller.createProduct" })]
+              ),
+              created_at: trx.fn.now(),
+              updated_at: trx.fn.now(),
+            };
+            if (hasSkuColumn("supplier_cost_cents")) {
+              skuInsert.supplier_cost_cents = parseNonNegativeInt(
+                variantInput?.supplierCostCents ??
+                  variantInput?.supplier_cost_cents ??
+                  body.supplierCostCents ??
+                  body.supplier_cost_cents
+              );
+            }
+            if (hasSkuColumn("mrp_cents")) {
+              skuInsert.mrp_cents = parseNonNegativeInt(
+                variantInput?.mrpCents ??
+                  variantInput?.mrp_cents ??
+                  body.mrpCents ??
+                  body.mrp_cents
+              );
+            }
+
+            const [insertedSku] = await trx("inventory_skus")
+              .insert(skuInsert)
+              .returning(["id"]);
+            resolvedInventorySkuId = insertedSku?.id || null;
+          } catch (err) {
+            if (err?.code === "23505") {
+              supplierSkuAttempts += 1;
+              supplierSkuAttempt = `${supplierSkuBase}-${randomSuffix()}`;
+              continue;
+            }
+            throw err;
+          }
+        }
+      }
+
+      if (!resolvedInventorySkuId) {
+        throw Object.assign(new Error("inventory_sku_create_failed"), {
+          code: "INVENTORY_SKU_CREATE_FAILED",
+        });
+      }
+
+      let insertedVariantId = null;
+      let variantInsertAttempts = 0;
+      while (variantInsertAttempts < 4 && !insertedVariantId) {
+        const candidateSku = `${baseSku}${variantInsertAttempts ? `-${randomSuffix()}` : ""}`;
+        try {
+          const vendorPayoutParsed = parseNonNegativeInt(
+            variantInput?.vendorPayoutCents ??
+              variantInput?.vendor_payout_cents ??
+              body.vendorPayoutCents ??
+              body.vendor_payout_cents ??
+              body.vendorPayCents ??
+              body.vendor_pay_cents
+          );
+          const royaltyParsed = parseNonNegativeInt(
+            variantInput?.royaltyCents ??
+              variantInput?.royalty_cents ??
+              body.royaltyCents ??
+              body.royalty_cents
+          );
+          const ourShareParsed = parseNonNegativeInt(
+            variantInput?.ourShareCents ??
+              variantInput?.our_share_cents ??
+              body.ourShareCents ??
+              body.our_share_cents
+          );
+          const shareResolution = resolveOurShareCents({
+            sellingPriceCents: priceResult.priceCents,
+            vendorPayoutCents:
+              vendorPayoutParsed === null ? undefined : vendorPayoutParsed,
+            royaltyCents: royaltyParsed === null ? undefined : royaltyParsed,
+            ourShareCents: ourShareParsed === null ? undefined : ourShareParsed,
+          });
+          if (shareResolution.error) {
+            throw Object.assign(new Error(shareResolution.error), {
+              code: "INVALID_VARIANT_ECONOMICS",
+              field: "our_share_cents",
+            });
+          }
+          if (
+            ourShareParsed === null &&
+            vendorPayoutParsed !== null &&
+            royaltyParsed !== null &&
+            typeof shareResolution.ourShareCents !== "number"
+          ) {
+            throw Object.assign(new Error("invalid_our_share_cents"), {
+              code: "INVALID_VARIANT_ECONOMICS",
+              field: "our_share_cents",
+            });
+          }
+
+          const variantInsert = {
+            product_id: insertedProduct.id,
+            sku: candidateSku,
+            size: normalizedSize,
+            color: normalizedColor,
+            price_cents: priceResult.priceCents,
+            created_at: trx.fn.now(),
+          };
+          if (hasVariantColumn("inventory_sku_id")) {
+            variantInsert.inventory_sku_id = resolvedInventorySkuId;
+          }
+          if (hasVariantColumn("selling_price_cents")) {
+            variantInsert.selling_price_cents = priceResult.priceCents;
+          }
+          if (hasVariantColumn("vendor_payout_cents") && vendorPayoutParsed !== null) {
+            variantInsert.vendor_payout_cents = vendorPayoutParsed;
+          }
+          if (hasVariantColumn("royalty_cents") && royaltyParsed !== null) {
+            variantInsert.royalty_cents = royaltyParsed;
+          }
+          if (
+            hasVariantColumn("our_share_cents") &&
+            typeof shareResolution.ourShareCents === "number"
+          ) {
+            variantInsert.our_share_cents = shareResolution.ourShareCents;
+          }
+          if (hasVariantColumn("is_listed")) {
+            variantInsert.is_listed = true;
+          }
+          if (hasVariantColumn("stock")) {
+            // Compatibility mirror only; source of truth is inventory_skus.stock.
+            variantInsert.stock = variantStock;
+          }
+          if (hasVariantColumn("updated_at")) {
+            variantInsert.updated_at = trx.fn.now();
+          }
+
+          const [insertedVariant] = await trx("product_variants")
+            .insert(variantInsert)
+            .returning(["id"]);
+          insertedVariantId = insertedVariant?.id || null;
+        } catch (err) {
+          if (err?.code === "23505" || err?.message?.includes("duplicate key")) {
+            variantInsertAttempts += 1;
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      if (!insertedVariantId) {
+        throw Object.assign(new Error("variant_sku_conflict"), { code: "VARIANT_SKU_CONFLICT" });
+      }
+
+      const insertedVariantRow = await buildVariantInventoryQuery(trx, {
+        productId: insertedProduct.id,
+      })
+        .where("pv.id", insertedVariantId)
+        .first();
+
+      return {
+        productRow: insertedProduct,
+        variantRow: formatVariantInventoryRow(insertedVariantRow),
+      };
+    });
+
+    productRow = created.productRow;
+    variantRow = created.variantRow;
+  } catch (err) {
+    if (err?.code === "INVENTORY_SKU_NOT_FOUND") {
+      return res.status(400).json({ error: "inventory_sku_not_found" });
+    }
+    if (err?.code === "INVALID_VARIANT_ECONOMICS") {
+      return res.status(400).json({ error: err?.message || "invalid_variant_economics" });
+    }
+    if (err?.code === "VARIANT_SKU_CONFLICT") {
+      return res.status(500).json({ error: "internal_server_error", message: "variant_sku_conflict" });
+    }
+    console.error("[create_product] failed", err);
+    return res.status(500).json({ error: "internal_server_error" });
   }
 
   let listingPhotoUrls = [];
@@ -642,16 +928,7 @@ const createProduct = async (req, res) => {
     photoUrls: listingPhotoUrls,
     listingPhotoUrls,
     product: productPayload,
-    defaultVariant: variantRow
-      ? {
-          id: variantRow.id,
-          sku: variantRow.sku,
-          size: variantRow.size,
-          color: variantRow.color,
-          priceCents: variantRow.priceCents,
-          stock: variantRow.stock,
-        }
-      : null,
+    defaultVariant: variantRow || null,
   });
 };
 
@@ -696,8 +973,14 @@ const updateProduct = async (req, res) => {
 
   const productColumns = await db("products").columnInfo();
   const hasColumn = (name) => Object.prototype.hasOwnProperty.call(productColumns, name);
+  const variantColumns = await db("product_variants").columnInfo();
+  const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
   const hasAnyPayloadKey = (keys = []) =>
     keys.some((key) => Object.prototype.hasOwnProperty.call(payload, key));
+  const existingProduct = await db("products").where({ id }).first();
+  if (!existingProduct) {
+    return res.status(404).json(NOT_FOUND);
+  }
 
   if (typeof payload.title === "string") {
     patch.title = payload.title;
@@ -767,7 +1050,7 @@ const updateProduct = async (req, res) => {
   }
 
   if (
-    (hasColumn("vendor_pay_cents") || hasColumn("vendor_payout_cents")) &&
+    hasColumn("vendor_payout_cents") &&
     hasAnyPayloadKey([
       "vendor_pay_cents",
       "vendorPayCents",
@@ -793,16 +1076,39 @@ const updateProduct = async (req, res) => {
       return res.status(400).json({
         error: "validation",
         details: [
-          { field: "vendor_pay_cents", message: "vendor_pay_cents/vendor_pay must be a number >= 0" },
+          {
+            field: "vendor_payout_cents",
+            message: "vendor_payout_cents/vendor_pay must be a number >= 0",
+          },
         ],
       });
     }
-    if (hasColumn("vendor_pay_cents")) {
-      patch.vendor_pay_cents = vendorPayParsed.value;
+    patch.vendor_payout_cents = vendorPayParsed.value;
+  }
+
+  if (
+    hasColumn("selling_price_cents") &&
+    hasAnyPayloadKey(["selling_price_cents", "sellingPriceCents", "price_cents", "priceCents"])
+  ) {
+    const sellingParsed = parseMerchMoneyToCents({
+      body: payload,
+      centsKeys: ["selling_price_cents", "sellingPriceCents", "price_cents", "priceCents"],
+      amountKeys: ["selling_price", "sellingPrice", "price"],
+      minCents: 1,
+      required: true,
+    });
+    if (!sellingParsed.ok || sellingParsed.value === null) {
+      return res.status(400).json({
+        error: "validation",
+        details: [
+          {
+            field: "selling_price_cents",
+            message: "selling_price_cents/price must be a number greater than 0",
+          },
+        ],
+      });
     }
-    if (hasColumn("vendor_payout_cents")) {
-      patch.vendor_payout_cents = vendorPayParsed.value;
-    }
+    patch.selling_price_cents = sellingParsed.value;
   }
 
   if (hasColumn("our_share_cents") && hasAnyPayloadKey(["our_share_cents", "ourShareCents", "our_share", "ourShare"])) {
@@ -837,6 +1143,48 @@ const updateProduct = async (req, res) => {
       });
     }
     patch.royalty_cents = royaltyParsed.value;
+  }
+
+  const hasExplicitProductOurShare = hasAnyPayloadKey([
+    "our_share_cents",
+    "ourShareCents",
+    "our_share",
+    "ourShare",
+  ]);
+  if (hasColumn("our_share_cents") && !hasExplicitProductOurShare) {
+    const nextSellingPrice = parseNonNegativeInt(
+      patch.selling_price_cents ??
+        existingProduct.selling_price_cents ??
+        patch.mrp_cents ??
+        existingProduct.mrp_cents
+    );
+    const nextVendorPayout = parseNonNegativeInt(
+      patch.vendor_payout_cents ?? existingProduct.vendor_payout_cents
+    );
+    const nextRoyalty = parseNonNegativeInt(
+      patch.royalty_cents ?? existingProduct.royalty_cents
+    );
+
+    const shareResolution = resolveOurShareCents({
+      sellingPriceCents: nextSellingPrice,
+      vendorPayoutCents:
+        nextVendorPayout === null ? undefined : nextVendorPayout,
+      royaltyCents: nextRoyalty === null ? undefined : nextRoyalty,
+      ourShareCents: undefined,
+    });
+    if (shareResolution.error) {
+      return res.status(400).json({ error: shareResolution.error });
+    }
+    if (
+      nextVendorPayout !== null &&
+      nextRoyalty !== null &&
+      typeof shareResolution.ourShareCents !== "number"
+    ) {
+      return res.status(400).json({ error: "invalid_our_share_cents" });
+    }
+    if (typeof shareResolution.ourShareCents === "number") {
+      patch.our_share_cents = shareResolution.ourShareCents;
+    }
   }
 
   if (typeof payload.active === "boolean") {
@@ -890,8 +1238,14 @@ const updateProduct = async (req, res) => {
         return res.status(400).json({ error: "missing_variant_id" });
       }
 
+      const variantSelection = ["id"];
+      if (hasVariantColumn("price_cents")) variantSelection.push("price_cents");
+      if (hasVariantColumn("selling_price_cents")) variantSelection.push("selling_price_cents");
+      if (hasVariantColumn("vendor_payout_cents")) variantSelection.push("vendor_payout_cents");
+      if (hasVariantColumn("royalty_cents")) variantSelection.push("royalty_cents");
+      if (hasVariantColumn("our_share_cents")) variantSelection.push("our_share_cents");
       const variantRow = await db("product_variants")
-        .select("id")
+        .select(variantSelection)
         .where({ id: variantId, product_id: id })
         .first();
       if (!variantRow) {
@@ -902,11 +1256,18 @@ const updateProduct = async (req, res) => {
 
       if (
         typeof variantUpdate.price !== "undefined" ||
-        typeof variantUpdate.priceCents !== "undefined"
+        typeof variantUpdate.priceCents !== "undefined" ||
+        typeof variantUpdate.price_cents !== "undefined" ||
+        typeof variantUpdate.sellingPriceCents !== "undefined" ||
+        typeof variantUpdate.selling_price_cents !== "undefined"
       ) {
         const priceResult = normalizeProductPrice({
           price: variantUpdate.price,
-          priceCents: variantUpdate.priceCents,
+          priceCents:
+            variantUpdate.sellingPriceCents ??
+            variantUpdate.selling_price_cents ??
+            variantUpdate.priceCents ??
+            variantUpdate.price_cents,
           requirePrice: false,
         });
         if (priceResult.error) {
@@ -914,40 +1275,140 @@ const updateProduct = async (req, res) => {
         }
         if (typeof priceResult.priceCents === "number") {
           variantPatch.price_cents = priceResult.priceCents;
+          if (hasVariantColumn("selling_price_cents")) {
+            variantPatch.selling_price_cents = priceResult.priceCents;
+          }
         }
       }
 
-      if (typeof variantUpdate.stock !== "undefined" && variantUpdate.stock !== null) {
-        const stockNumber = Number(variantUpdate.stock);
-        if (!Number.isFinite(stockNumber) || !Number.isInteger(stockNumber) || stockNumber < 0) {
-          return res.status(400).json({ error: "invalid_stock" });
+      if (
+        typeof variantUpdate.isListed !== "undefined" ||
+        typeof variantUpdate.is_listed !== "undefined"
+      ) {
+        const isListedRaw =
+          typeof variantUpdate.isListed !== "undefined"
+            ? variantUpdate.isListed
+            : variantUpdate.is_listed;
+        if (typeof isListedRaw !== "boolean") {
+          return res.status(400).json({ error: "invalid_is_listed" });
         }
-        variantPatch.stock = stockNumber;
+        if (hasVariantColumn("is_listed")) {
+          variantPatch.is_listed = isListedRaw;
+        }
+      }
+
+      const nextInventorySkuId = asUuidOrNull(
+        variantUpdate.inventorySkuId ?? variantUpdate.inventory_sku_id
+      );
+      if (
+        typeof variantUpdate.inventorySkuId !== "undefined" ||
+        typeof variantUpdate.inventory_sku_id !== "undefined"
+      ) {
+        if (!hasVariantColumn("inventory_sku_id")) {
+          return res.status(500).json({ error: "inventory_sku_not_configured" });
+        }
+        if (!nextInventorySkuId) {
+          return res.status(400).json({ error: "invalid_inventory_sku_id" });
+        }
+        const existingSku = await db("inventory_skus")
+          .select("id")
+          .where({ id: nextInventorySkuId })
+          .first();
+        if (!existingSku) {
+          return res.status(400).json({ error: "inventory_sku_not_found" });
+        }
+        const duplicateMapping = await db("product_variants")
+          .select("id")
+          .where({ product_id: id, inventory_sku_id: nextInventorySkuId })
+          .whereNot({ id: variantId })
+          .first();
+        if (duplicateMapping) {
+          return res.status(409).json({ error: "duplicate_inventory_sku_mapping" });
+        }
+        variantPatch.inventory_sku_id = nextInventorySkuId;
+      }
+
+      const payoutKeys = [
+        ["vendor_payout_cents", "vendorPayoutCents"],
+        ["royalty_cents", "royaltyCents"],
+        ["our_share_cents", "ourShareCents"],
+      ];
+      for (const [snake, camel] of payoutKeys) {
+        if (!hasVariantColumn(snake)) continue;
+        if (
+          typeof variantUpdate[snake] === "undefined" &&
+          typeof variantUpdate[camel] === "undefined"
+        ) {
+          continue;
+        }
+        const parsed = parseNonNegativeInt(variantUpdate[snake] ?? variantUpdate[camel]);
+        if (parsed === null) {
+          return res.status(400).json({ error: `invalid_${snake}` });
+        }
+        variantPatch[snake] = parsed;
+      }
+
+      if (hasVariantColumn("our_share_cents")) {
+        const hasExplicitOurShare =
+          typeof variantUpdate.our_share_cents !== "undefined" ||
+          typeof variantUpdate.ourShareCents !== "undefined";
+        const nextSellingPrice = parseNonNegativeInt(
+          variantPatch.selling_price_cents ??
+            variantRow.selling_price_cents ??
+            variantPatch.price_cents ??
+            variantRow.price_cents
+        );
+        const nextVendorPayout = parseNonNegativeInt(
+          variantPatch.vendor_payout_cents ?? variantRow.vendor_payout_cents
+        );
+        const nextRoyalty = parseNonNegativeInt(
+          variantPatch.royalty_cents ?? variantRow.royalty_cents
+        );
+        const nextOurShareInput = hasExplicitOurShare
+          ? variantPatch.our_share_cents
+          : parseNonNegativeInt(variantRow.our_share_cents);
+
+        const shareResolution = resolveOurShareCents({
+          sellingPriceCents: nextSellingPrice,
+          vendorPayoutCents:
+            nextVendorPayout === null ? undefined : nextVendorPayout,
+          royaltyCents: nextRoyalty === null ? undefined : nextRoyalty,
+          ourShareCents: nextOurShareInput === null ? undefined : nextOurShareInput,
+        });
+        if (shareResolution.error) {
+          return res.status(400).json({ error: shareResolution.error });
+        }
+        if (
+          !hasExplicitOurShare &&
+          nextVendorPayout !== null &&
+          nextRoyalty !== null &&
+          typeof shareResolution.ourShareCents !== "number"
+        ) {
+          return res.status(400).json({ error: "invalid_our_share_cents" });
+        }
+        if (
+          !hasExplicitOurShare &&
+          typeof shareResolution.ourShareCents === "number"
+        ) {
+          variantPatch.our_share_cents = shareResolution.ourShareCents;
+        }
       }
 
       if (Object.keys(variantPatch).length === 0) {
         continue;
       }
 
+      if (hasVariantColumn("updated_at")) {
+        variantPatch.updated_at = db.fn.now();
+      }
       await db("product_variants").where({ id: variantId }).update(variantPatch);
     }
   }
 
-  const loadPrimaryVariant = () =>
-    db("product_variants")
-      .select(
-        "id",
-        "sku",
-        "size",
-        "color",
-        "price_cents as priceCents",
-        "stock"
-      )
-      .where({ product_id: id })
-      .orderBy("created_at", "asc")
-      .first();
-
-  const primaryVariant = await loadPrimaryVariant();
+  const primaryVariantRaw = await buildVariantInventoryQuery(db, { productId: id })
+    .orderBy("pv.created_at", "asc")
+    .first();
+  const primaryVariant = formatVariantInventoryRow(primaryVariantRaw);
 
   return res.json({
     product: {
@@ -956,16 +1417,7 @@ const updateProduct = async (req, res) => {
       description: productRow.description,
       isActive: Boolean(productRow.isActive),
     },
-    defaultVariant: primaryVariant
-      ? {
-          id: primaryVariant.id,
-          sku: primaryVariant.sku,
-          size: primaryVariant.size,
-          color: primaryVariant.color,
-          priceCents: primaryVariant.priceCents,
-          stock: primaryVariant.stock,
-        }
-      : null,
+    defaultVariant: primaryVariant || null,
   });
 };
 

@@ -7,6 +7,10 @@ const { ok, fail } = require("../../core/http/errorResponse");
 const rateLimit = require("../../core/http/rateLimit");
 const { orderSpamGuard } = require("../../core/http/spamDetection");
 const { startPaymentForOrder, confirmAttempt } = require("../payments/payments.api");
+const {
+  isNonNegativeInteger,
+  resolveOurShareCents,
+} = require("../catalog/economics");
 
 const router = express.Router();
 
@@ -51,6 +55,200 @@ const parseOrderItems = (body) => {
   ]);
 };
 
+const asNullableNumber = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const asBoolean = (value) => value === true || value === "true" || value === 1 || value === "1";
+
+const parseOptionalEconomicsInt = (value, field) => {
+  const parsed = asNullableNumber(value);
+  if (parsed === null) return { value: null, error: null };
+  if (!isNonNegativeInteger(parsed)) {
+    return { value: null, error: `invalid_${field}` };
+  }
+  return { value: parsed, error: null };
+};
+
+const normalizeVariantEconomicsForCheckout = (variant) => {
+  const sellingPriceCents = asNullableNumber(variant?.selling_price_cents);
+  if (!isNonNegativeInteger(sellingPriceCents)) {
+    return { error: "invalid_selling_price_cents" };
+  }
+
+  const vendor = parseOptionalEconomicsInt(variant?.vendor_payout_cents, "vendor_payout_cents");
+  if (vendor.error) return { error: vendor.error };
+  const royalty = parseOptionalEconomicsInt(variant?.royalty_cents, "royalty_cents");
+  if (royalty.error) return { error: royalty.error };
+  const share = parseOptionalEconomicsInt(variant?.our_share_cents, "our_share_cents");
+  if (share.error) return { error: share.error };
+
+  const shareResolution = resolveOurShareCents({
+    sellingPriceCents,
+    vendorPayoutCents: vendor.value === null ? undefined : vendor.value,
+    royaltyCents: royalty.value === null ? undefined : royalty.value,
+    ourShareCents: share.value === null ? undefined : share.value,
+  });
+  if (shareResolution.error) {
+    return { error: shareResolution.error };
+  }
+  if (
+    share.value === null &&
+    vendor.value !== null &&
+    royalty.value !== null &&
+    typeof shareResolution.ourShareCents !== "number"
+  ) {
+    return { error: "invalid_our_share_cents" };
+  }
+
+  return {
+    error: null,
+    value: {
+      ...variant,
+      selling_price_cents: sellingPriceCents,
+      vendor_payout_cents: vendor.value,
+      royalty_cents: royalty.value,
+      our_share_cents:
+        typeof shareResolution.ourShareCents === "number"
+          ? shareResolution.ourShareCents
+          : null,
+    },
+  };
+};
+
+const isVariantEffectivelySellable = (variant) => {
+  if (!variant) return false;
+  const productActive = asBoolean(variant.product_is_active);
+  const variantListed = variant.is_listed === undefined ? true : asBoolean(variant.is_listed);
+  const skuActive = asBoolean(variant.sku_is_active);
+  const stock = Number(variant.stock ?? 0);
+  return productActive && variantListed && skuActive && stock > 0;
+};
+
+const getOrderItemColumns = async (trx) => trx("order_items").columnInfo();
+
+const buildOrderItemInsertPayload = ({
+  columns = {},
+  orderId,
+  line,
+  variant,
+  now,
+}) => {
+  const hasColumn = (name) => Object.prototype.hasOwnProperty.call(columns, name);
+  const payload = {
+    id: randomUUID(),
+    order_id: orderId,
+    product_id: line.productId,
+    product_variant_id: line.productVariantId,
+    quantity: line.quantity,
+    price_cents: variant.selling_price_cents,
+    created_at: now,
+  };
+
+  if (hasColumn("inventory_sku_id")) payload.inventory_sku_id = variant.inventory_sku_id || null;
+  if (hasColumn("supplier_sku")) payload.supplier_sku = variant.supplier_sku || null;
+  if (hasColumn("merch_type")) payload.merch_type = variant.merch_type || null;
+  if (hasColumn("quality_tier")) payload.quality_tier = variant.quality_tier || null;
+  if (hasColumn("size")) payload.size = variant.size || null;
+  if (hasColumn("color")) payload.color = variant.color || null;
+  if (hasColumn("selling_price_cents")) payload.selling_price_cents = variant.selling_price_cents;
+  if (hasColumn("vendor_payout_cents")) {
+    payload.vendor_payout_cents =
+      variant.vendor_payout_cents == null ? null : Number(variant.vendor_payout_cents);
+  }
+  if (hasColumn("royalty_cents")) {
+    payload.royalty_cents = variant.royalty_cents == null ? null : Number(variant.royalty_cents);
+  }
+  if (hasColumn("our_share_cents")) {
+    payload.our_share_cents =
+      variant.our_share_cents == null ? null : Number(variant.our_share_cents);
+  }
+  return payload;
+};
+
+const fetchVariantForCheckout = async (trx, line) =>
+  trx("product_variants as pv")
+    .join("products as p", "p.id", "pv.product_id")
+    .leftJoin("inventory_skus as sk", "sk.id", "pv.inventory_sku_id")
+    .where("pv.id", line.productVariantId)
+    .andWhere("pv.product_id", line.productId)
+    .select(
+      "pv.id",
+      "pv.product_id",
+      "pv.inventory_sku_id",
+      "pv.is_listed",
+      "p.is_active as product_is_active",
+      "sk.supplier_sku",
+      "sk.merch_type",
+      "sk.quality_tier",
+      "sk.size",
+      "sk.color",
+      "sk.stock",
+      "sk.is_active as sku_is_active",
+      trx.raw("coalesce(pv.selling_price_cents, pv.price_cents) as selling_price_cents"),
+      trx.raw("coalesce(pv.vendor_payout_cents, p.vendor_payout_cents) as vendor_payout_cents"),
+      trx.raw("coalesce(pv.royalty_cents, p.royalty_cents) as royalty_cents"),
+      trx.raw("coalesce(pv.our_share_cents, p.our_share_cents) as our_share_cents")
+    )
+    .first();
+
+const decrementInventorySkuStock = async ({ trx, inventorySkuId, quantity, now }) =>
+  trx("inventory_skus")
+    .where({ id: inventorySkuId, is_active: true })
+    .andWhere("stock", ">=", quantity)
+    .update({
+      stock: trx.raw("stock - ?", [quantity]),
+      updated_at: now,
+    });
+
+const reserveInventoryForLine = async ({
+  trx,
+  line,
+  now,
+  loadVariant = fetchVariantForCheckout,
+  decrementInventory = decrementInventorySkuStock,
+}) => {
+  const rawVariant = await loadVariant(trx, line);
+  if (!rawVariant) {
+    const err = new Error("product_not_found");
+    err.code = "PRODUCT_NOT_FOUND";
+    throw err;
+  }
+  const normalizedEconomics = normalizeVariantEconomicsForCheckout(rawVariant);
+  if (normalizedEconomics.error) {
+    const err = new Error(normalizedEconomics.error);
+    err.code = "INVALID_VARIANT_ECONOMICS";
+    throw err;
+  }
+  const variant = normalizedEconomics.value;
+  if (!variant.inventory_sku_id || !isVariantEffectivelySellable(variant)) {
+    const err = new Error("out_of_stock");
+    err.code = "OUT_OF_STOCK";
+    throw err;
+  }
+  const availableStock = Number(variant.stock ?? 0);
+  if (!Number.isFinite(availableStock) || availableStock < line.quantity) {
+    const err = new Error("out_of_stock");
+    err.code = "OUT_OF_STOCK";
+    throw err;
+  }
+
+  const updated = await decrementInventory({
+    trx,
+    inventorySkuId: variant.inventory_sku_id,
+    quantity: line.quantity,
+    now,
+  });
+  if (Number(updated) < 1) {
+    const err = new Error("out_of_stock");
+    err.code = "OUT_OF_STOCK";
+    throw err;
+  }
+  return variant;
+};
+
 const orderCreateLimiter = rateLimit({
   windowMs: 60_000,
   max: 5,
@@ -83,6 +281,17 @@ const formatItem = (row) => {
     productVariantId: row.product_variant_id,
     quantity: row.quantity,
     priceCents: row.price_cents,
+    inventorySkuId: row.inventory_sku_id || null,
+    supplierSku: row.supplier_sku || null,
+    merchType: row.merch_type || null,
+    qualityTier: row.quality_tier || null,
+    size: row.size || null,
+    color: row.color || null,
+    sellingPriceCents:
+      asNullableNumber(row.selling_price_cents) ?? asNullableNumber(row.price_cents),
+    vendorPayoutCents: asNullableNumber(row.vendor_payout_cents),
+    royaltyCents: asNullableNumber(row.royalty_cents),
+    ourShareCents: asNullableNumber(row.our_share_cents),
     createdAt: row.created_at,
   };
 };
@@ -269,6 +478,7 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
         "id",
         "product_id",
         "product_variant_id",
+        "inventory_sku_id",
         "quantity",
         "price_cents",
         "created_at"
@@ -294,15 +504,37 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
           "id",
           "product_id",
           "product_variant_id",
+          "inventory_sku_id",
           "quantity",
           "price_cents",
           "created_at"
         );
 
+      const unresolvedVariantIds = items
+        .filter((item) => !item.inventory_sku_id && item.product_variant_id)
+        .map((item) => item.product_variant_id);
+      const fallbackSkuMap = new Map();
+      if (unresolvedVariantIds.length > 0) {
+        const variantRows = await trx("product_variants")
+          .select("id", "inventory_sku_id")
+          .whereIn("id", unresolvedVariantIds);
+        for (const row of variantRows) {
+          if (row?.id && row?.inventory_sku_id) {
+            fallbackSkuMap.set(row.id, row.inventory_sku_id);
+          }
+        }
+      }
+
       for (const item of items) {
-        await trx("product_variants")
-          .where({ id: item.product_variant_id })
-          .increment("stock", item.quantity);
+        const inventorySkuId =
+          item.inventory_sku_id || fallbackSkuMap.get(item.product_variant_id) || null;
+        if (!inventorySkuId) continue;
+        await trx("inventory_skus")
+          .where({ id: inventorySkuId })
+          .update({
+            stock: trx.raw("stock + ?", [item.quantity]),
+            updated_at: now,
+          });
       }
 
       await trx("order_events").insert({
@@ -399,48 +631,14 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
         const db = getDb();
         const order = await db.transaction(async (trx) => {
           const now = trx.fn.now();
-          const supportsReturning = (trx.client?.config?.client || "").includes("pg");
           let totalCents = 0;
           const details = [];
+          const orderItemColumns = await getOrderItemColumns(trx);
           for (const line of normalized) {
-            const baseStockUpdate = trx("product_variants")
-              .where({
-                id: line.productVariantId,
-                product_id: line.productId,
-              })
-              .andWhere("stock", ">=", line.quantity);
-
-            let variant;
-            if (supportsReturning) {
-              const updatedRows = await baseStockUpdate
-                .clone()
-                .update({
-                  stock: trx.raw("stock - ?", [line.quantity]),
-                })
-                .returning("*");
-              variant = updatedRows[0];
-            } else {
-              const updatedCount = await baseStockUpdate.update({
-                stock: trx.raw("stock - ?", [line.quantity]),
-              });
-              if (Number(updatedCount) > 0) {
-                variant = await trx("product_variants")
-                  .where({
-                    id: line.productVariantId,
-                    product_id: line.productId,
-                  })
-                  .first();
-              }
-            }
-
-            if (!variant) {
-              const err = new Error("out_of_stock");
-              err.code = "OUT_OF_STOCK";
-              throw err;
-            }
-
-            totalCents += variant.price_cents * line.quantity;
-            details.push({ line, variant });
+            const variant = await reserveInventoryForLine({ trx, line, now });
+            const linePriceCents = Number(variant.selling_price_cents ?? 0);
+            totalCents += linePriceCents * line.quantity;
+            details.push({ line, variant, orderItemColumns });
           }
           const orderId = randomUUID();
           await trx("orders").insert({
@@ -464,15 +662,15 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
             .ignore();
 
           for (const detail of details) {
-            await trx("order_items").insert({
-              id: randomUUID(),
-              order_id: orderId,
-              product_id: detail.line.productId,
-              product_variant_id: detail.line.productVariantId,
-              quantity: detail.line.quantity,
-              price_cents: detail.variant.price_cents,
-              created_at: now,
-            });
+            await trx("order_items").insert(
+              buildOrderItemInsertPayload({
+                columns: detail.orderItemColumns,
+                orderId,
+                line: detail.line,
+                variant: detail.variant,
+                now,
+              })
+            );
           }
 
           await trx("order_events").insert({
@@ -493,6 +691,9 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
         if (err?.code === "PRODUCT_NOT_FOUND") {
           return fail(res, 404, PRODUCT_NOT_FOUND, "Product not found");
         }
+        if (err?.code === "INVALID_VARIANT_ECONOMICS") {
+          return fail(res, 400, VALIDATION_ERROR, "Invalid variant economics");
+        }
         if (err?.code === "OUT_OF_STOCK") {
           return fail(res, 400, OUT_OF_STOCK, "Out of stock");
         }
@@ -502,3 +703,10 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
   );
 
 module.exports = router;
+module.exports.__test = {
+  isVariantEffectivelySellable,
+  normalizeVariantEconomicsForCheckout,
+  buildOrderItemInsertPayload,
+  decrementInventorySkuStock,
+  reserveInventoryForLine,
+};

@@ -1,6 +1,10 @@
 const artistService = require("./artist.service");
 const { getDb } = require("../../core/db/db");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const {
+  buildSellableMinPriceSubquery,
+  applySellableVariantExists,
+} = require("../catalog/variantAvailability");
 
 const NOT_FOUND = { error: "artist_not_found" };
 
@@ -99,7 +103,7 @@ const getShelf = async (req, res) => {
   }
 
   const db = getDb();
-  const shelfRows = await db("products as p")
+  const shelfQuery = db("products as p")
     .where("p.artist_id", row.id)
     .andWhere("p.is_active", true)
     .select(
@@ -107,11 +111,11 @@ const getShelf = async (req, res) => {
       "p.title",
       "p.artist_id",
       "p.is_active",
-      db.raw(
-        "(select min(price_cents) from product_variants pv where pv.product_id = p.id) as price_cents"
-      )
+      buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
     )
     .orderBy("p.created_at", "desc");
+  applySellableVariantExists(shelfQuery, { productRef: "p.id" });
+  const shelfRows = await shelfQuery;
 
   const cardImageMap = await loadEntityMediaUrlMap(
     "product",

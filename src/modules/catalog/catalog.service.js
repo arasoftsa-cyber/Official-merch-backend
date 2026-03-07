@@ -4,6 +4,16 @@ const { randomUUID } = require("crypto");
 const { getDb } = require("../../core/db/db");
 const { getUploadDir, ensureUploadDir } = require("../../core/config/uploadPaths");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const {
+  buildSellableMinPriceSubquery,
+  applySellableVariantExists,
+  buildVariantInventoryQuery,
+  formatVariantInventoryRow,
+} = require("./variantAvailability");
+const {
+  resolveOurShareCents,
+  isNonNegativeInteger,
+} = require("./economics");
 
 const PRODUCT_UPLOAD_DIR = getUploadDir("products");
 const ALLOWED_PRODUCT_COLORS = new Set([
@@ -29,6 +39,8 @@ const NEW_MERCH_TRIGGER_FIELDS = new Set([
   "merchMrp",
   "mrp_cents",
   "mrpCents",
+  "selling_price_cents",
+  "sellingPriceCents",
   "vendor_pay",
   "vendorPay",
   "vendor_pay_cents",
@@ -67,6 +79,27 @@ const parseNonNegativeInt = (value) => {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0) return null;
   return n;
+};
+
+const buildTransitionalSupplierSku = ({ productId, variant, index }) => {
+  const shortProductId = String(productId || "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase()
+    .slice(0, 8);
+  const variantSku = String(variant?.sku || "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase()
+    .slice(0, 12);
+  const size = String(variant?.size || "default")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase()
+    .slice(0, 8);
+  const color = String(variant?.color || "default")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase()
+    .slice(0, 12);
+  const segment = String(index + 1).padStart(2, "0");
+  return `LEGACY-${shortProductId || "PRODUCT"}-${variantSku || "SKU"}-${color}-${size}-${segment}`;
 };
 
 const normalizeColors = (value) => {
@@ -119,6 +152,25 @@ const parseMerchMoneyToCents = ({
 
   if (required) return { ok: false, value: null, provided: false };
   return { ok: true, value: null, provided: false };
+};
+
+const deriveSellingPriceFromSplit = ({
+  vendorPayoutCents,
+  royaltyCents,
+  ourShareCents,
+}) => {
+  if (
+    !isNonNegativeInteger(vendorPayoutCents) ||
+    !isNonNegativeInteger(royaltyCents) ||
+    !isNonNegativeInteger(ourShareCents)
+  ) {
+    return null;
+  }
+  const total = vendorPayoutCents + royaltyCents + ourShareCents;
+  if (!Number.isSafeInteger(total) || total < 0) {
+    return null;
+  }
+  return total;
 };
 
 const validateProductColors = (rawColors, { required = false, defaultToBlack = false } = {}) => {
@@ -214,7 +266,7 @@ const validateListingPhotoFiles = (filesByField = {}, { required = true } = {}) 
 
 const getActiveProducts = async () => {
   const db = getDb();
-  return db("products")
+  const query = db("products")
     .select(
       "id",
       "title",
@@ -223,14 +275,12 @@ const getActiveProducts = async () => {
       "artist_id as artistId",
       "is_active",
       "is_active as isActive",
-      db.raw(
-        "(select min(price_cents) from product_variants v where v.product_id = products.id) as priceCents"
-      ),
-      db.raw(
-        "(select min(price_cents) from product_variants v where v.product_id = products.id) as minVariantPriceCents"
-      )
+      buildSellableMinPriceSubquery(db).wrap("(", ") as \"priceCents\""),
+      buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
     )
     .where({ is_active: true });
+  applySellableVariantExists(query);
+  return query;
 };
 
 const getAdminProducts = async () => {
@@ -251,14 +301,11 @@ const getAdminProducts = async () => {
   if (Object.prototype.hasOwnProperty.call(columns, "mrp_cents")) {
     selections.push("mrp_cents");
   }
-  if (Object.prototype.hasOwnProperty.call(columns, "vendor_pay_cents")) {
-    selections.push("vendor_pay_cents");
-  }
   if (Object.prototype.hasOwnProperty.call(columns, "vendor_payout_cents")) {
     selections.push("vendor_payout_cents");
-    if (!Object.prototype.hasOwnProperty.call(columns, "vendor_pay_cents")) {
-      selections.push(db.raw("vendor_payout_cents as vendor_pay_cents"));
-    }
+  }
+  if (Object.prototype.hasOwnProperty.call(columns, "selling_price_cents")) {
+    selections.push("selling_price_cents");
   }
   if (Object.prototype.hasOwnProperty.call(columns, "our_share_cents")) {
     selections.push("our_share_cents");
@@ -279,12 +326,8 @@ const getAdminProducts = async () => {
   return db("products")
     .select(
       selections.concat([
-        db.raw(
-          "(select min(price_cents) from product_variants v where v.product_id = products.id) as priceCents"
-        ),
-        db.raw(
-          "(select min(price_cents) from product_variants v where v.product_id = products.id) as minVariantPriceCents"
-        ),
+        buildSellableMinPriceSubquery(db).wrap("(", ") as \"priceCents\""),
+        buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\""),
       ])
     )
     .orderBy("created_at", "desc");
@@ -302,9 +345,7 @@ const getProductsByArtistId = async (artistId) => {
       "artist_id as artistId",
       "is_active",
       "is_active as isActive",
-      db.raw(
-        "(select min(price_cents) from product_variants v where v.product_id = products.id) as minVariantPriceCents"
-      )
+      buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
     )
     .where({ artist_id: artistId })
     .orderBy("created_at", "desc");
@@ -315,21 +356,17 @@ const getProductById = async (id) => {
   const product = await db("products")
     .select(
       "products.*",
-      db.raw(
-        "(select min(price_cents) from product_variants v where v.product_id = products.id) as priceCents"
-      ),
-      db.raw(
-        "(select min(price_cents) from product_variants v where v.product_id = products.id) as minVariantPriceCents"
-      )
+      buildSellableMinPriceSubquery(db).wrap("(", ") as \"priceCents\""),
+      buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
     )
     .where({ id })
     .first();
   if (!product) {
     return null;
   }
-  const variants = await db("product_variants")
-    .select("id", "sku", "size", "color", "price_cents as priceCents", "stock")
-    .where({ product_id: id });
+  const variants = (
+    await buildVariantInventoryQuery(db, { productId: id }).orderBy("pv.created_at", "asc")
+  ).map(formatVariantInventoryRow);
   return {
     product,
     variants,
@@ -365,7 +402,7 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
     minCents: 1,
     required: false,
   });
-  const vendorPayCentsParsed = parseMerchMoneyToCents({
+  const vendorPayoutCentsParsed = parseMerchMoneyToCents({
     body,
     centsKeys: [
       "vendor_pay_cents",
@@ -377,12 +414,24 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
     minCents: 0,
     required: true,
   });
+  const sellingPriceCentsParsed = parseMerchMoneyToCents({
+    body,
+    centsKeys: [
+      "selling_price_cents",
+      "sellingPriceCents",
+      "price_cents",
+      "priceCents",
+    ],
+    amountKeys: ["selling_price", "sellingPrice", "price"],
+    minCents: 1,
+    required: false,
+  });
   const ourShareCentsParsed = parseMerchMoneyToCents({
     body,
     centsKeys: ["our_share_cents", "ourShareCents"],
     amountKeys: ["our_share", "ourShare"],
     minCents: 0,
-    required: true,
+    required: false,
   });
   const royaltyCentsParsed = parseMerchMoneyToCents({
     body,
@@ -407,8 +456,17 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
   if (!mrpCentsParsed.ok && mrpCentsParsed.provided) {
     add("mrp_cents", "mrp_cents/merch_mrp must be a number greater than 0");
   }
-  if (!vendorPayCentsParsed.ok) {
-    add("vendor_pay_cents", "vendor_pay_cents/vendor_pay must be a number >= 0");
+  if (!sellingPriceCentsParsed.ok && sellingPriceCentsParsed.provided) {
+    add(
+      "selling_price_cents",
+      "selling_price_cents/price must be a number greater than 0"
+    );
+  }
+  if (!vendorPayoutCentsParsed.ok) {
+    add(
+      "vendor_payout_cents",
+      "vendor_payout_cents/vendor_pay must be a number >= 0"
+    );
   }
   if (!ourShareCentsParsed.ok) {
     add("our_share_cents", "our_share_cents/our_share must be a number >= 0");
@@ -424,6 +482,35 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
   });
   if (!listingValidation.ok) details.push(...listingValidation.details);
 
+  const derivedSellingPriceCents = deriveSellingPriceFromSplit({
+    vendorPayoutCents: vendorPayoutCentsParsed.value,
+    royaltyCents: royaltyCentsParsed.value,
+    ourShareCents: ourShareCentsParsed.value,
+  });
+  const sellingPriceCents =
+    sellingPriceCentsParsed.value ?? mrpCentsParsed.value ?? derivedSellingPriceCents ?? null;
+
+  const shareResolution = resolveOurShareCents({
+    sellingPriceCents,
+    vendorPayoutCents: vendorPayoutCentsParsed.value,
+    royaltyCents: royaltyCentsParsed.value,
+    ourShareCents: ourShareCentsParsed.provided ? ourShareCentsParsed.value : undefined,
+  });
+  if (shareResolution.error) {
+    add("our_share_cents", "our_share_cents must be a non-negative integer");
+  } else if (
+    !ourShareCentsParsed.provided &&
+    isNonNegativeInteger(sellingPriceCents) &&
+    typeof vendorPayoutCentsParsed.value === "number" &&
+    typeof royaltyCentsParsed.value === "number" &&
+    typeof shareResolution.ourShareCents !== "number"
+  ) {
+    add(
+      "our_share_cents",
+      "our_share_cents would be negative with current selling/vendor/royalty values"
+    );
+  }
+
   if (details.length > 0) return { ok: false, details };
 
   return {
@@ -433,8 +520,12 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
       merchName,
       merchStory,
       mrpCents: mrpCentsParsed.value,
-      vendorPayCents: vendorPayCentsParsed.value,
-      ourShareCents: ourShareCentsParsed.value,
+      sellingPriceCents,
+      vendorPayoutCents: vendorPayoutCentsParsed.value,
+      ourShareCents:
+        typeof shareResolution.ourShareCents === "number"
+          ? shareResolution.ourShareCents
+          : null,
       royaltyCents: royaltyCentsParsed.value,
       merchType,
       colors: colorsResult.colors,
@@ -578,6 +669,14 @@ const createProductWithVariants = async (input) => {
   const db = getDb();
   return db.transaction(async (trx) => {
     const productId = randomUUID();
+    const [variantColumns, skuColumns] = await Promise.all([
+      trx("product_variants").columnInfo(),
+      trx("inventory_skus").columnInfo(),
+    ]);
+
+    const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
+    const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
+
     await trx("products").insert({
       id: productId,
       artist_id: input.artistId,
@@ -586,15 +685,138 @@ const createProductWithVariants = async (input) => {
       is_active: input.isActive === undefined ? true : input.isActive,
     });
 
-    const variantRows = input.variants.map((variant) => ({
-      id: randomUUID(),
-      product_id: productId,
-      sku: variant.sku,
-      size: variant.size,
-      color: variant.color,
-      price_cents: variant.priceCents,
-      stock: variant.stock,
-    }));
+    const variantRows = [];
+    const seenSupplierSkus = new Set();
+    for (let index = 0; index < input.variants.length; index += 1) {
+      const variant = input.variants[index] || {};
+      const stock = parseNonNegativeInt(variant.stock) ?? 0;
+      const size = String(variant.size || "default").trim() || "default";
+      const color = String(variant.color || "default").trim() || "default";
+      const merchType = String(variant.merchType || variant.merch_type || "default").trim() || "default";
+      const inventorySkuIdInput = String(
+        variant.inventorySkuId || variant.inventory_sku_id || ""
+      ).trim();
+
+      let inventorySkuId = inventorySkuIdInput || null;
+      if (inventorySkuId) {
+        const existingSku = await trx("inventory_skus").where({ id: inventorySkuId }).first("id");
+        if (!existingSku) {
+          throw Object.assign(new Error("inventory_sku_not_found"), { code: "INVENTORY_SKU_NOT_FOUND" });
+        }
+      } else {
+        let supplierSku = String(variant.supplierSku || variant.supplier_sku || "").trim();
+        if (!supplierSku) {
+          supplierSku = buildTransitionalSupplierSku({ productId, variant, index });
+        }
+        if (seenSupplierSkus.has(supplierSku)) {
+          supplierSku = `${supplierSku}-${String(randomUUID()).slice(0, 8).toUpperCase()}`;
+        }
+        seenSupplierSkus.add(supplierSku);
+
+        const skuInsert = {
+          id: randomUUID(),
+          supplier_sku: supplierSku,
+          merch_type: merchType,
+          quality_tier: variant.qualityTier || variant.quality_tier || null,
+          size,
+          color,
+          stock,
+          is_active: true,
+          metadata: trx.raw("?::jsonb", [JSON.stringify({ source: "createProductWithVariants" })]),
+          created_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        };
+
+        if (hasSkuColumn("supplier_cost_cents")) {
+          skuInsert.supplier_cost_cents = parseNonNegativeInt(
+            variant.supplierCostCents ?? variant.supplier_cost_cents
+          );
+        }
+        if (hasSkuColumn("mrp_cents")) {
+          skuInsert.mrp_cents = parseNonNegativeInt(variant.mrpCents ?? variant.mrp_cents);
+        }
+
+        const [createdSku] = await trx("inventory_skus")
+          .insert(skuInsert)
+          .returning("id");
+        inventorySkuId = createdSku?.id || skuInsert.id;
+      }
+
+      const priceCents = parseNonNegativeInt(variant.priceCents ?? variant.price_cents);
+      if (priceCents === null) {
+        throw Object.assign(new Error("invalid_price"), { code: "INVALID_VARIANT_PRICE" });
+      }
+      const vendorPayoutCents = parseNonNegativeInt(
+        variant.vendorPayoutCents ?? variant.vendor_payout_cents
+      );
+      const royaltyCents = parseNonNegativeInt(
+        variant.royaltyCents ?? variant.royalty_cents
+      );
+      const ourShareParsed = parseNonNegativeInt(
+        variant.ourShareCents ?? variant.our_share_cents
+      );
+      const shareResolution = resolveOurShareCents({
+        sellingPriceCents: priceCents,
+        vendorPayoutCents:
+          vendorPayoutCents === null ? undefined : vendorPayoutCents,
+        royaltyCents: royaltyCents === null ? undefined : royaltyCents,
+        ourShareCents: ourShareParsed === null ? undefined : ourShareParsed,
+      });
+      if (shareResolution.error) {
+        throw Object.assign(new Error(shareResolution.error), {
+          code: "INVALID_VARIANT_ECONOMICS",
+        });
+      }
+      if (
+        ourShareParsed === null &&
+        vendorPayoutCents !== null &&
+        royaltyCents !== null &&
+        typeof shareResolution.ourShareCents !== "number"
+      ) {
+        throw Object.assign(new Error("invalid_our_share_cents"), {
+          code: "INVALID_VARIANT_ECONOMICS",
+        });
+      }
+
+      const variantInsert = {
+        id: randomUUID(),
+        product_id: productId,
+        sku: String(variant.sku || `SKU-${String(productId).slice(0, 8)}-${index + 1}`).trim(),
+        size,
+        color,
+        price_cents: priceCents,
+        created_at: trx.fn.now(),
+      };
+      if (hasVariantColumn("inventory_sku_id")) {
+        variantInsert.inventory_sku_id = inventorySkuId;
+      }
+      if (hasVariantColumn("is_listed")) {
+        variantInsert.is_listed = variant.isListed !== false;
+      }
+      if (hasVariantColumn("selling_price_cents")) {
+        variantInsert.selling_price_cents = priceCents;
+      }
+      if (hasVariantColumn("vendor_payout_cents") && vendorPayoutCents !== null) {
+        variantInsert.vendor_payout_cents = vendorPayoutCents;
+      }
+      if (hasVariantColumn("royalty_cents") && royaltyCents !== null) {
+        variantInsert.royalty_cents = royaltyCents;
+      }
+      if (
+        hasVariantColumn("our_share_cents") &&
+        typeof shareResolution.ourShareCents === "number"
+      ) {
+        variantInsert.our_share_cents = shareResolution.ourShareCents;
+      }
+      if (hasVariantColumn("stock")) {
+        // Compatibility mirror only; source of truth is inventory_skus.stock.
+        variantInsert.stock = stock;
+      }
+      if (hasVariantColumn("updated_at")) {
+        variantInsert.updated_at = trx.fn.now();
+      }
+      variantRows.push(variantInsert);
+    }
 
     await trx("product_variants").insert(variantRows);
 
