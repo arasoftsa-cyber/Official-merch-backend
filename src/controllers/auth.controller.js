@@ -1,11 +1,11 @@
 "use strict";
 
 const { hashPassword, verifyPassword } = require("../../utils/password");
-const { getDb } = require("../../core/db/db");
-const { ok, fail } = require("../../core/http/errorResponse");
-const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLockoutTime } = require("../../core/http/accountLockout");
-const authService = require("./auth.service");
-const userService = require("../users/user.api");
+const { getDb } = require("../core/db/db");
+const { ok, fail } = require("../core/http/errorResponse");
+const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLockoutTime } = require("../core/http/accountLockout");
+const authService = require("../services/auth.service");
+const userService = require("../services/user.service");
 
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
 const FAN_ALLOWED_ROLES = new Set(["buyer", "fan"]);
