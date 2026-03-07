@@ -58,6 +58,20 @@ const NEW_MERCH_TRIGGER_FIELDS = new Set([
   "merchType",
   "colors",
 ]);
+const ONBOARDING_ALLOWED_SKU_TYPES = new Set([
+  "regular_tshirt",
+  "oversized_tshirt",
+  "hoodie",
+  "oversized_hoodie",
+]);
+const DESIGN_IMAGE_FIELD_NAMES = ["design_image", "designImage", "design"];
+const ALLOWED_DESIGN_IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpg",
+  "image/jpeg",
+  "image/svg+xml",
+]);
+const ALLOWED_DESIGN_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".svg"];
 
 const readText = (value) => (typeof value === "string" ? value.trim() : "");
 const isBlank = (value) =>
@@ -197,7 +211,22 @@ const validateProductColors = (rawColors, { required = false, defaultToBlack = f
   };
 };
 
-const validateListingPhotoFiles = (filesByField = {}, { required = true } = {}) => {
+const validateListingPhotoFiles = (
+  filesByField = {},
+  { required = true, minFiles: minFilesInput, maxFiles: maxFilesInput, maxIndexedField: maxIndexedFieldInput } = {}
+) => {
+  const minFiles = Number.isInteger(minFilesInput)
+    ? Math.max(0, minFilesInput)
+    : required
+    ? 4
+    : 0;
+  const maxFiles = Number.isInteger(maxFilesInput)
+    ? Math.max(1, maxFilesInput)
+    : 4;
+  const maxIndexedField = Number.isInteger(maxIndexedFieldInput)
+    ? Math.max(1, maxIndexedFieldInput)
+    : maxFiles;
+  const indexedListingFieldRe = /^listing_photo_(\d+)$/i;
   const asFileArray = (value) => {
     if (!value) return [];
     if (Array.isArray(value)) {
@@ -215,27 +244,52 @@ const validateListingPhotoFiles = (filesByField = {}, { required = true } = {}) 
   if (collectionFiles.length > 0) {
     listingFiles = collectionFiles;
   } else {
-    listingFiles = LISTING_PHOTO_FIELD_NAMES.map((field) => {
-      const files = asFileArray(filesByField[field]);
-      return files[0];
-    }).filter(Boolean);
+    const indexedFields = Object.keys(filesByField || {})
+      .map((field) => {
+        const match = field.match(indexedListingFieldRe);
+        if (!match) return null;
+        const index = Number(match[1]);
+        if (!Number.isInteger(index) || index < 1 || index > maxIndexedField) return null;
+        return { field, index };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.index - b.index);
+
+    if (indexedFields.length > 0) {
+      listingFiles = indexedFields
+        .map(({ field }) => asFileArray(filesByField[field])[0])
+        .filter(Boolean);
+    } else {
+      listingFiles = LISTING_PHOTO_FIELD_NAMES.map((field) => {
+        const files = asFileArray(filesByField[field]);
+        return files[0];
+      }).filter(Boolean);
+    }
   }
 
   if (required && collectionFiles.length === 0) {
-    for (const field of LISTING_PHOTO_FIELD_NAMES) {
-      if (asFileArray(filesByField[field]).length === 0) {
+    const requiredFieldCount = minFiles > 0 ? minFiles : 1;
+    for (let index = 1; index <= requiredFieldCount; index += 1) {
+      const field = `listing_photo_${index}`;
+      if (asFileArray(filesByField[field]).length === 0 && !Object.keys(filesByField).some((key) => {
+        const match = key.match(indexedListingFieldRe);
+        return Boolean(match && Number(match[1]) === index && asFileArray(filesByField[key]).length > 0);
+      })) {
         details.push({ field, message: `${field} file is required` });
       }
     }
   }
 
   const providedListingFileKeys = Object.keys(filesByField).filter((field) => {
-    if (/^listing_photo_\d+$/i.test(field)) return true;
+    if (indexedListingFieldRe.test(field)) return true;
     return LISTING_PHOTO_COLLECTION_FIELDS.includes(field);
   });
   const hasUnexpectedListingFields = providedListingFileKeys.some((field) => {
     if (LISTING_PHOTO_COLLECTION_FIELDS.includes(field)) return false;
-    return !LISTING_PHOTO_FIELD_NAMES.includes(field);
+    const match = field.match(indexedListingFieldRe);
+    if (!match) return true;
+    const idx = Number(match[1]);
+    return !Number.isInteger(idx) || idx < 1 || idx > maxIndexedField;
   });
 
   const unexpectedPhotoType = providedListingFileKeys.some((field) =>
@@ -245,12 +299,23 @@ const validateListingPhotoFiles = (filesByField = {}, { required = true } = {}) 
     })
   );
 
-  if (listingFiles.length > 4) {
-    details.push({ field: "photos", message: "maximum 4 photos allowed" });
-  }
-
-  if (required && listingFiles.length !== 4) {
-    details.push({ field: "photos", message: "exactly 4 photos are required" });
+  if (required && minFiles === maxFiles) {
+    if (listingFiles.length !== minFiles) {
+      details.push({ field: "photos", message: `exactly ${minFiles} photos are required` });
+    }
+  } else {
+    if (required && listingFiles.length < minFiles) {
+      details.push({
+        field: "photos",
+        message: `at least ${minFiles} photos are required`,
+      });
+    }
+    if (listingFiles.length > maxFiles) {
+      details.push({
+        field: "photos",
+        message: `at most ${maxFiles} photos are allowed`,
+      });
+    }
   }
 
   if (hasUnexpectedListingFields || unexpectedPhotoType) {
@@ -264,8 +329,94 @@ const validateListingPhotoFiles = (filesByField = {}, { required = true } = {}) 
   };
 };
 
+const validateDesignImageFile = (filesByField = {}, { required = true } = {}) => {
+  const asFileArray = (value) => {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+      return value.filter((entry) => entry?.buffer?.length);
+    }
+    return value?.buffer?.length ? [value] : [];
+  };
+
+  const details = [];
+  const files = DESIGN_IMAGE_FIELD_NAMES.flatMap((field) => asFileArray(filesByField[field]));
+  const designFile = files[0] || null;
+
+  if (required && !designFile) {
+    details.push({ field: "design_image", message: "design image is required" });
+  }
+  if (files.length > 1) {
+    details.push({ field: "design_image", message: "only one design image is allowed" });
+  }
+  if (designFile) {
+    const mimeType = String(designFile.mimetype || "").toLowerCase();
+    const originalName = String(designFile.originalname || "").toLowerCase();
+    const extensionAllowed = ALLOWED_DESIGN_IMAGE_EXTENSIONS.some((ext) =>
+      originalName.endsWith(ext)
+    );
+    const mimeAllowed =
+      !mimeType || ALLOWED_DESIGN_IMAGE_MIME_TYPES.has(mimeType);
+    if (!mimeAllowed && !extensionAllowed) {
+      details.push({
+        field: "design_image",
+        message: "design image must be PNG, JPG, JPEG, or SVG",
+      });
+    }
+  }
+
+  return {
+    ok: details.length === 0,
+    details,
+    designFile,
+  };
+};
+
+const normalizeSkuTypes = (rawValue) => {
+  if (rawValue === undefined || rawValue === null) {
+    return { skuTypes: [], invalid: [] };
+  }
+
+  let list = rawValue;
+  if (typeof list === "string") {
+    const trimmed = list.trim();
+    if (!trimmed) {
+      list = [];
+    } else {
+      try {
+        const parsed = JSON.parse(trimmed);
+        list = Array.isArray(parsed) ? parsed : [trimmed];
+      } catch (_err) {
+        list = trimmed
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+      }
+    }
+  }
+  if (!Array.isArray(list)) {
+    list = [list];
+  }
+
+  const normalized = [];
+  const invalid = [];
+  for (const item of list) {
+    const value = readText(item).toLowerCase();
+    if (!value) continue;
+    if (!ONBOARDING_ALLOWED_SKU_TYPES.has(value)) {
+      invalid.push(value);
+      continue;
+    }
+    if (!normalized.includes(value)) normalized.push(value);
+  }
+
+  return { skuTypes: normalized, invalid };
+};
+
 const getActiveProducts = async () => {
   const db = getDb();
+  const productColumns = await db("products").columnInfo();
+  const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
+  const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
   const query = db("products")
     .select(
       "id",
@@ -277,8 +428,14 @@ const getActiveProducts = async () => {
       "is_active as isActive",
       buildSellableMinPriceSubquery(db).wrap("(", ") as \"priceCents\""),
       buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
-    )
-    .where({ is_active: true });
+    );
+  if (hasStatus) {
+    query.where({ status: "active" });
+  } else if (hasIsActive) {
+    query.where({ is_active: true });
+  } else {
+    query.whereRaw("1 = 0");
+  }
   applySellableVariantExists(query);
   return query;
 };
@@ -295,6 +452,8 @@ const getAdminProducts = async () => {
     "is_active",
     "is_active as isActive",
   ];
+  const hasStatus = Object.prototype.hasOwnProperty.call(columns, "status");
+
   if (Object.prototype.hasOwnProperty.call(columns, "merch_story")) {
     selections.push("merch_story");
   }
@@ -322,29 +481,54 @@ const getAdminProducts = async () => {
   if (Object.prototype.hasOwnProperty.call(columns, "listing_photos")) {
     selections.push("listing_photos");
   }
+  if (hasStatus) {
+    selections.push("status");
+  }
+  if (Object.prototype.hasOwnProperty.call(columns, "rejection_reason")) {
+    selections.push("rejection_reason");
+  }
+  if (Object.prototype.hasOwnProperty.call(columns, "sku_types")) {
+    selections.push("sku_types");
+  }
 
-  return db("products")
+  const query = db("products")
     .select(
       selections.concat([
         buildSellableMinPriceSubquery(db).wrap("(", ") as \"priceCents\""),
         buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\""),
       ])
-    )
-    .orderBy("created_at", "desc");
+    );
+
+  if (hasStatus) {
+    query.where((builder) => {
+      builder
+        .whereIn("status", ["active", "inactive"])
+        .orWhere((fallback) => fallback.whereNull("status").andWhere("is_active", true));
+    });
+  }
+
+  return query.orderBy("created_at", "desc");
 };
 
 const getProductsByArtistId = async (artistId) => {
   const db = getDb();
+  const columns = await db("products").columnInfo();
+  const selections = [
+    "id",
+    "title",
+    "description",
+    "created_at",
+    "updated_at",
+    "artist_id as artistId",
+    "is_active",
+    "is_active as isActive",
+  ];
+  if (Object.prototype.hasOwnProperty.call(columns, "status")) {
+    selections.push("status");
+  }
   return db("products")
     .select(
-      "id",
-      "title",
-      "description",
-      "created_at",
-      "updated_at",
-      "artist_id as artistId",
-      "is_active",
-      "is_active as isActive",
+      ...selections,
       buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
     )
     .where({ artist_id: artistId })
@@ -536,6 +720,10 @@ const validateNewMerch = (body = {}, filesByField = {}, options = {}) => {
 };
 
 const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
+  return saveProductMediaFiles({ trx, productId, files, role: "listing_photo" });
+};
+
+const saveProductMediaFiles = async ({ trx, productId, files = [], role = "listing_photo" }) => {
   ensureUploadDir("products");
   const urls = [];
 
@@ -560,7 +748,7 @@ const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
       media_asset_id: mediaAssetId,
       entity_type: "product",
       entity_id: productId,
-      role: "listing_photo",
+      role,
       sort_order: index,
       created_at: trx.fn.now(),
     });
@@ -572,6 +760,10 @@ const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
 };
 
 const loadProductListingPhotos = async (productId) => {
+  return loadProductMediaByRole({ productId, role: "listing_photo" });
+};
+
+const loadProductMediaByRole = async ({ productId, role }) => {
   if (!productId) return [];
   const db = getDb();
   const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
@@ -582,13 +774,18 @@ const loadProductListingPhotos = async (productId) => {
     .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
     .where("eml.entity_type", "product")
     .andWhere("eml.entity_id", productId)
-    .andWhere("eml.role", "listing_photo")
+    .andWhere("eml.role", role)
     .orderBy("eml.sort_order", "asc")
     .select("ma.public_url");
 
   return rows
     .map((row) => toAbsolutePublicUrl(row.public_url))
     .filter(Boolean);
+};
+
+const loadProductDesignImage = async (productId) => {
+  const urls = await loadProductMediaByRole({ productId, role: "design_image" });
+  return urls[0] || "";
 };
 
 const attachListingPhotosToProducts = async (products = []) => {
@@ -650,40 +847,81 @@ const attachListingPhotosToProducts = async (products = []) => {
 };
 
 const replaceProductListingPhotos = async ({ trx, productId, files = [] }) => {
+  return replaceProductMediaByRole({
+    trx,
+    productId,
+    files,
+    role: "listing_photo",
+  });
+};
+
+const replaceProductMediaByRole = async ({ trx, productId, files = [], role }) => {
   await trx("entity_media_links")
     .where({
       entity_type: "product",
       entity_id: productId,
-      role: "listing_photo",
+      role,
     })
     .delete();
 
-  return saveProductListingPhotos({
+  return saveProductMediaFiles({
     trx,
     productId,
     files,
+    role,
   });
+};
+
+const saveProductDesignImage = async ({ trx, productId, file }) => {
+  if (!file) return "";
+  const urls = await replaceProductMediaByRole({
+    trx,
+    productId,
+    files: [file],
+    role: "design_image",
+  });
+  return urls[0] || "";
 };
 
 const createProductWithVariants = async (input) => {
   const db = getDb();
   return db.transaction(async (trx) => {
     const productId = randomUUID();
-    const [variantColumns, skuColumns] = await Promise.all([
+    const [productColumns, variantColumns, skuColumns] = await Promise.all([
+      trx("products").columnInfo(),
       trx("product_variants").columnInfo(),
       trx("inventory_skus").columnInfo(),
     ]);
 
+    const hasProductColumn = (name) => Object.prototype.hasOwnProperty.call(productColumns, name);
     const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
     const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
+    const normalizedRequestedStatus = ["pending", "inactive", "active", "rejected"].includes(
+      String(input?.status || "")
+        .trim()
+        .toLowerCase()
+    )
+      ? String(input.status).trim().toLowerCase()
+      : null;
+    const resolvedStatus =
+      normalizedRequestedStatus ||
+      ((input.isActive === undefined ? true : Boolean(input.isActive)) ? "active" : "inactive");
 
-    await trx("products").insert({
+    const productInsert = {
       id: productId,
       artist_id: input.artistId,
       title: input.title,
       description: input.description || null,
-      is_active: input.isActive === undefined ? true : input.isActive,
-    });
+      is_active: resolvedStatus === "active",
+    };
+    if (hasProductColumn("status")) {
+      productInsert.status = resolvedStatus;
+    }
+    if (hasProductColumn("rejection_reason") && resolvedStatus !== "rejected") {
+      productInsert.rejection_reason = null;
+    }
+
+    await trx("products").insert(productInsert);
 
     const variantRows = [];
     const seenSupplierSkus = new Set();
@@ -832,11 +1070,17 @@ module.exports = {
   detectNewMerchFlow,
   validateNewMerch,
   validateListingPhotoFiles,
+  validateDesignImageFile,
+  normalizeSkuTypes,
   validateProductColors,
   parseMerchMoneyToCents,
+  ONBOARDING_ALLOWED_SKU_TYPES,
   saveProductListingPhotos,
   replaceProductListingPhotos,
   loadProductListingPhotos,
+  saveProductDesignImage,
+  loadProductDesignImage,
   attachListingPhotosToProducts,
   createProductWithVariants,
 };
+

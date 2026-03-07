@@ -40,29 +40,20 @@ const PORT = process.env.PORT || 3000;
 const BUILD_ID = process.env.BUILD_ID || new Date().toISOString();
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
-console.log("[env] NODE_ENV=", process.env.NODE_ENV, "isProduction=", isProduction);
-const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
-const devRoutesEnabledEnv = String(process.env.DEV_ROUTES_ENABLED || "").toLowerCase();
-const smokeSeedEnv = String(process.env.SMOKE_SEED || "").toLowerCase();
-const smokeSeedEnabledEnv = String(process.env.SMOKE_SEED_ENABLED || "").toLowerCase();
-const ciSmokeEnv = String(process.env.CI_SMOKE || "").toLowerCase();
-const SMOKE_SEED_ENABLED =
-  !isProduction &&
-  (smokeSeedEnv === "1" ||
-    smokeSeedEnv === "true" ||
-    smokeSeedEnabledEnv === "1" ||
-    smokeSeedEnabledEnv === "true" ||
-    ciSmokeEnv === "1" ||
-    ciSmokeEnv === "true");
-const hasExplicitDevRoutesFlag =
-  devRoutesEnabledEnv === "1" ||
-  devRoutesEnabledEnv === "true" ||
-  smokeSeedEnabledEnv === "1" ||
-  smokeSeedEnabledEnv === "true";
-const DEV_ROUTES_ENABLED = !isProduction && hasExplicitDevRoutesFlag;
-console.log("### BACKEND BUILD ID ###", BUILD_ID, "pid=", process.pid);
-console.log("BUILD_ID Value:", BUILD_ID);
-console.log("SMOKE_SEED_ENABLED", SMOKE_SEED_ENABLED);
+const DEV_ROUTES_ENABLED = !isProduction;
+const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
+const logStartupDebug = (...args) => {
+  if (DEBUG_STARTUP) {
+    console.log(...args);
+  }
+};
+logStartupDebug("[startup]", {
+  env: process.env.NODE_ENV || "",
+  isProduction,
+  buildId: BUILD_ID,
+  pid: process.pid,
+  devRoutesEnabled: DEV_ROUTES_ENABLED,
+});
 const deprecateMiddleware = (message) => (req, _res, next) => {
   console.warn(`[DEPRECATION] ${message}`);
   next();
@@ -166,11 +157,11 @@ if (cors) {
   app.options(/.*/, cors(corsOptions));
 }
 app.use("/uploads", express.static(UPLOADS_DIR));
-console.log("[static] uploads served from", UPLOADS_DIR);
+logStartupDebug("[static] uploads served from", UPLOADS_DIR);
 ensureUploadDir("products");
 if (!isProduction) {
-  console.log("[uploads] root:", getUploadRoot());
-  console.log("[uploads] products:", getUploadDir("products"));
+  logStartupDebug("[uploads] root:", getUploadRoot());
+  logStartupDebug("[uploads] products:", getUploadDir("products"));
 }
 app.use(attachAuthUser);
 app.use(requestId);
@@ -373,11 +364,9 @@ if (DEV_ROUTES_ENABLED) {
 
   mountedRoutes.push('/api/dev');
   app.use('/api/dev', requireDevAdmin, devRoutesRouter);
-  console.log("DEV_ROUTES_MOUNTED /api/dev", {
+  logStartupDebug("DEV_ROUTES_MOUNTED /api/dev", {
     nodeEnv: process.env.NODE_ENV,
     enabled: DEV_ROUTES_ENABLED,
-    smoke: SMOKE_SEED_ENABLED,
-    explicitFlag: hasExplicitDevRoutesFlag,
   });
 
   app.get("/api/dev/_routes", requireDevAdmin, (req, res) => {
@@ -630,10 +619,10 @@ const seedArtistAccessRequestsIfEmpty = async () => {
     const count =
       (countResult?.rows?.[0]?.count ?? countResult?.[0]?.count ?? 0) || 0;
     if (count > 0) {
-      console.log("artist_access_requests already seeded:", count);
+      logStartupDebug("artist_access_requests already seeded:", count);
       return;
     }
-    console.log("Seeding artist_access_requests...");
+    logStartupDebug("Seeding artist_access_requests...");
     const seedData = [
       {
         artist_name: "Midnight Echo",
@@ -677,7 +666,7 @@ const seedArtistAccessRequestsIfEmpty = async () => {
         ]
       );
     }
-    console.log("Seeded artist_access_requests successfully.");
+    logStartupDebug("Seeded artist_access_requests successfully.");
   } catch (err) {
     console.error("Seed failed:", err);
   }

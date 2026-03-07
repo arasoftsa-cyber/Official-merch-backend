@@ -16,6 +16,24 @@ const LABEL_HANDLE = "test-label";
 const PRODUCT_TITLE = "Seed Artist Tee";
 const DROP_HANDLE = "seed-drop";
 const VARIANT_SKU = "SEED-SKU-1";
+const SUPPLIER_SKU = "SEED-SUPPLIER-SKU-1";
+
+const readSeedValue = (env = {}, key, fallback) => {
+  const raw = env && Object.prototype.hasOwnProperty.call(env, key) ? env[key] : undefined;
+  const value = typeof raw === "string" ? raw.trim() : "";
+  return value || fallback;
+};
+
+const buildSeedConfig = (env = process.env) => ({
+  adminEmail: readSeedValue(env, "ADMIN_EMAIL", ADMIN_EMAIL),
+  buyerEmail: readSeedValue(env, "BUYER_EMAIL", BUYER_EMAIL),
+  artistEmail: readSeedValue(env, "ARTIST_EMAIL", ARTIST_EMAIL),
+  labelEmail: readSeedValue(env, "LABEL_EMAIL", LABEL_EMAIL),
+  adminPassword: readSeedValue(env, "ADMIN_PASSWORD", ADMIN_PASSWORD),
+  buyerPassword: readSeedValue(env, "BUYER_PASSWORD", BUYER_PASSWORD),
+  artistPassword: readSeedValue(env, "ARTIST_PASSWORD", ARTIST_PASSWORD),
+  labelPassword: readSeedValue(env, "LABEL_PASSWORD", LABEL_PASSWORD),
+});
 
 const QUIZ_JSON = {
   title: "Smoke Drop Quiz",
@@ -112,68 +130,176 @@ const ensureLabel = async (trx) => {
 };
 
 const ensureProduct = async (trx, artistId) => {
+  const productColumns = await trx("products").columnInfo();
+  const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
+
   const existing = await trx("products")
     .where({ artist_id: artistId, title: PRODUCT_TITLE })
     .first("id", "artist_id", "title", "is_active");
 
   if (existing) {
-    const [updated] = await trx("products")
-      .where({ id: existing.id })
-      .update({
-        artist_id: artistId,
-        title: PRODUCT_TITLE,
-        description: "Deterministic seeded product",
-        is_active: true,
-      })
-      .returning(["id", "artist_id", "title", "is_active"]);
-    return updated || existing;
-  }
-
-  const [created] = await trx("products")
-    .insert({
-      id: randomUUID(),
+    const updatePayload = {
       artist_id: artistId,
       title: PRODUCT_TITLE,
       description: "Deterministic seeded product",
       is_active: true,
-      created_at: trx.fn.now(),
-    })
+    };
+    if (hasStatus) {
+      updatePayload.status = "active";
+    }
+
+    const [updated] = await trx("products")
+      .where({ id: existing.id })
+      .update(updatePayload)
+      .returning(["id", "artist_id", "title", "is_active"]);
+    return updated || existing;
+  }
+
+  const insertPayload = {
+    id: randomUUID(),
+    artist_id: artistId,
+    title: PRODUCT_TITLE,
+    description: "Deterministic seeded product",
+    is_active: true,
+    created_at: trx.fn.now(),
+  };
+  if (hasStatus) {
+    insertPayload.status = "active";
+  }
+
+  const [created] = await trx("products")
+    .insert(insertPayload)
     .returning(["id", "artist_id", "title", "is_active"]);
   return created;
 };
 
-const ensureVariant = async (trx, productId) => {
-  const existing = await trx("product_variants")
-    .where({ sku: VARIANT_SKU })
-    .first("id", "product_id", "sku", "price_cents", "stock");
+const ensureInventorySku = async (trx) => {
+  const skuColumns = await trx("inventory_skus").columnInfo();
+  const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
+
+  const selectColumns = ["id", "supplier_sku", "stock", "is_active"];
+  if (hasSkuColumn("merch_type")) selectColumns.push("merch_type");
+  if (hasSkuColumn("size")) selectColumns.push("size");
+  if (hasSkuColumn("color")) selectColumns.push("color");
+
+  const existing = await trx("inventory_skus")
+    .where({ supplier_sku: SUPPLIER_SKU })
+    .first(...selectColumns);
 
   if (existing) {
-    const [updated] = await trx("product_variants")
+    const patch = {
+      is_active: true,
+      stock: trx.raw("GREATEST(stock, 10)"),
+    };
+    if (hasSkuColumn("merch_type")) patch.merch_type = "regular_tshirt";
+    if (hasSkuColumn("size")) patch.size = "M";
+    if (hasSkuColumn("color")) patch.color = "Black";
+    if (hasSkuColumn("updated_at")) patch.updated_at = trx.fn.now();
+
+    const [updated] = await trx("inventory_skus")
       .where({ id: existing.id })
-      .update({
-        product_id: productId,
-        sku: VARIANT_SKU,
-        size: "M",
-        color: "Black",
-        price_cents: 2999,
-        stock: trx.raw("GREATEST(stock, 10)"),
-      })
-      .returning(["id", "product_id", "sku", "price_cents", "stock"]);
+      .update(patch)
+      .returning(selectColumns);
     return updated || existing;
   }
 
-  const [created] = await trx("product_variants")
-    .insert({
-      id: randomUUID(),
+  const payload = {
+    id: randomUUID(),
+    supplier_sku: SUPPLIER_SKU,
+    merch_type: "regular_tshirt",
+    quality_tier: "standard",
+    size: "M",
+    color: "Black",
+    stock: 10,
+    is_active: true,
+    created_at: trx.fn.now(),
+  };
+  if (hasSkuColumn("updated_at")) payload.updated_at = trx.fn.now();
+  if (hasSkuColumn("metadata")) {
+    payload.metadata = trx.raw("?::jsonb", [JSON.stringify({ source: "seed_ui_smoke" })]);
+  }
+
+  const [created] = await trx("inventory_skus")
+    .insert(payload)
+    .returning(selectColumns);
+  return created || payload;
+};
+
+const ensureVariant = async (trx, productId, inventorySkuId) => {
+  const variantColumns = await trx("product_variants").columnInfo();
+  const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
+
+  const selectColumns = ["id", "product_id", "sku", "price_cents", "stock"];
+  if (hasVariantColumn("inventory_sku_id")) selectColumns.push("inventory_sku_id");
+  if (hasVariantColumn("selling_price_cents")) selectColumns.push("selling_price_cents");
+  if (hasVariantColumn("is_listed")) selectColumns.push("is_listed");
+
+  const existing = await trx("product_variants")
+    .where({ sku: VARIANT_SKU })
+    .first(...selectColumns);
+
+  if (existing) {
+    const patch = {
       product_id: productId,
       sku: VARIANT_SKU,
       size: "M",
       color: "Black",
       price_cents: 2999,
-      stock: 10,
-      created_at: trx.fn.now(),
-    })
-    .returning(["id", "product_id", "sku", "price_cents", "stock"]);
+      stock: trx.raw("GREATEST(stock, 10)"),
+    };
+    if (hasVariantColumn("inventory_sku_id")) patch.inventory_sku_id = inventorySkuId;
+    if (hasVariantColumn("selling_price_cents")) patch.selling_price_cents = 2999;
+    if (hasVariantColumn("is_listed")) patch.is_listed = true;
+    if (hasVariantColumn("updated_at")) patch.updated_at = trx.fn.now();
+
+    const [updated] = await trx("product_variants")
+      .where({ id: existing.id })
+      .update(patch)
+      .returning(selectColumns);
+    return updated || existing;
+  }
+
+  // Unique(product_id, inventory_sku_id) may already contain a legacy row for this seeded mapping.
+  if (hasVariantColumn("inventory_sku_id")) {
+    const mapped = await trx("product_variants")
+      .where({ product_id: productId, inventory_sku_id: inventorySkuId })
+      .first(...selectColumns);
+    if (mapped) {
+      const [updatedMapped] = await trx("product_variants")
+        .where({ id: mapped.id })
+        .update({
+          sku: VARIANT_SKU,
+          size: "M",
+          color: "Black",
+          price_cents: 2999,
+          stock: trx.raw("GREATEST(stock, 10)"),
+          ...(hasVariantColumn("selling_price_cents") ? { selling_price_cents: 2999 } : {}),
+          ...(hasVariantColumn("is_listed") ? { is_listed: true } : {}),
+          ...(hasVariantColumn("updated_at") ? { updated_at: trx.fn.now() } : {}),
+        })
+        .returning(selectColumns);
+      return updatedMapped || mapped;
+    }
+  }
+
+  const insertPayload = {
+    id: randomUUID(),
+    product_id: productId,
+    sku: VARIANT_SKU,
+    size: "M",
+    color: "Black",
+    price_cents: 2999,
+    stock: 10,
+    created_at: trx.fn.now(),
+  };
+  if (hasVariantColumn("inventory_sku_id")) insertPayload.inventory_sku_id = inventorySkuId;
+  if (hasVariantColumn("selling_price_cents")) insertPayload.selling_price_cents = 2999;
+  if (hasVariantColumn("is_listed")) insertPayload.is_listed = true;
+  if (hasVariantColumn("updated_at")) insertPayload.updated_at = trx.fn.now();
+
+  const [created] = await trx("product_variants")
+    .insert(insertPayload)
+    .returning(selectColumns);
   return created;
 };
 
@@ -389,30 +515,31 @@ const ensureArtistLinksForSmokeUsers = async (trx, artistId, primaryArtistUserId
 
 async function seedUiSmoke({ env }) {
   const db = getDb();
+  const seedConfig = buildSeedConfig(env || process.env);
   return db.transaction(async (trx) => {
     const adminUser = await ensureUser(trx, {
-      email: ADMIN_EMAIL,
+      email: seedConfig.adminEmail,
       role: "admin",
-      password: ADMIN_PASSWORD,
+      password: seedConfig.adminPassword,
       fallbackId: "00000000-0000-0000-0000-000000000001",
     });
 
     const buyerUser = await ensureUser(trx, {
-      email: BUYER_EMAIL,
+      email: seedConfig.buyerEmail,
       role: "buyer",
-      password: BUYER_PASSWORD,
+      password: seedConfig.buyerPassword,
       fallbackId: "00000000-0000-0000-0000-000000000002",
     });
     const artistUser = await ensureUser(trx, {
-      email: ARTIST_EMAIL,
+      email: seedConfig.artistEmail,
       role: "artist",
-      password: ARTIST_PASSWORD,
+      password: seedConfig.artistPassword,
       fallbackId: "00000000-0000-0000-0000-000000000003",
     });
     const labelUser = await ensureUser(trx, {
-      email: LABEL_EMAIL,
+      email: seedConfig.labelEmail,
       role: "label",
-      password: LABEL_PASSWORD,
+      password: seedConfig.labelPassword,
       fallbackId: "00000000-0000-0000-0000-000000000004",
     });
 
@@ -443,7 +570,8 @@ async function seedUiSmoke({ env }) {
     }
 
     const product = await ensureProduct(trx, artist.id);
-    const variant = await ensureVariant(trx, product.id);
+    const inventorySku = await ensureInventorySku(trx);
+    const variant = await ensureVariant(trx, product.id, inventorySku.id);
     const drop = await ensureDrop(trx, {
       productId: product.id,
       artistId: artist.id,
@@ -458,6 +586,7 @@ async function seedUiSmoke({ env }) {
     });
 
     return {
+      adminUser,
       buyerUser,
       artistUser,
       labelUser,
@@ -465,6 +594,7 @@ async function seedUiSmoke({ env }) {
       label,
       product,
       variant,
+      inventorySku,
       drop,
       order,
     };
@@ -472,3 +602,4 @@ async function seedUiSmoke({ env }) {
 }
 
 module.exports = { seedUiSmoke };
+

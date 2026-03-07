@@ -6,6 +6,10 @@ const {
   listProducts,
   listArtistProducts,
   getProduct,
+  createArtistOnboardingRequest,
+  listAdminOnboardingRequests,
+  approveOnboardingRequest,
+  rejectOnboardingRequest,
   createProduct,
   updateProduct,
   updateProductPhotos,
@@ -64,6 +68,13 @@ const allowAdminOrArtist = (req, res, next) => {
   return next();
 };
 
+const requireArtist = (req, res, next) => {
+  if (req.user?.role !== "artist") {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  return next();
+};
+
 const normalizeStatusPatch = (req, res, next) => {
   const body = req.body || {};
   if (typeof body.active === "boolean" && typeof body.isActive === "undefined") {
@@ -76,6 +87,33 @@ router.get("/products", listProducts);
 router.get("/artist/products", requireAuth, listArtistProducts);
 router.get("/products/:id", getProduct);
 router.get("/admin/products", requireAuth, requireAdmin, listProducts);
+router.get("/admin/products/onboarding", requireAuth, requireAdmin, listAdminOnboardingRequests);
+
+router.post(
+  "/artist/products/onboarding",
+  requireAuth,
+  requireArtist,
+  rejectLabelMutations,
+  rejectBuyerMutations,
+  createArtistOnboardingRequest
+);
+router.post(
+  "/admin/products/:id/onboarding/approve",
+  requireAuth,
+  requireAdmin,
+  rejectLabelMutations,
+  rejectBuyerMutations,
+  approveOnboardingRequest
+);
+router.post(
+  "/admin/products/:id/onboarding/reject",
+  requireAuth,
+  requireAdmin,
+  rejectLabelMutations,
+  rejectBuyerMutations,
+  express.json(),
+  rejectOnboardingRequest
+);
 
 router.post(
   "/products",

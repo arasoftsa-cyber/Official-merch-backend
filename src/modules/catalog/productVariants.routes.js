@@ -11,6 +11,16 @@ const { resolveOurShareCents } = require("./economics");
 const router = express.Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PRODUCT_STATUS_ACTIVE = "active";
+const PRODUCT_STATUS_INACTIVE = "inactive";
+const PRODUCT_STATUS_PENDING = "pending";
+const PRODUCT_STATUS_REJECTED = "rejected";
+const PRODUCT_STATUS_VALUES = new Set([
+  PRODUCT_STATUS_PENDING,
+  PRODUCT_STATUS_INACTIVE,
+  PRODUCT_STATUS_ACTIVE,
+  PRODUCT_STATUS_REJECTED,
+]);
 
 const ensureAdminAccess = async (req, res, next) => {
   if (req.user?.role !== "admin") {
@@ -61,6 +71,13 @@ const throwWithCode = (code) => {
   const err = new Error(code.toLowerCase());
   err.code = code;
   throw err;
+};
+
+const normalizeProductStatusValue = (rawValue) => {
+  if (typeof rawValue !== "string") return null;
+  const normalized = rawValue.trim().toLowerCase();
+  if (!PRODUCT_STATUS_VALUES.has(normalized)) return null;
+  return normalized;
 };
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
@@ -295,10 +312,13 @@ router.put(
 
       const created = await db.transaction(async (trx) => {
         const touchedVariantIds = [];
-        const [variantColumns, skuColumns] = await Promise.all([
+        const [productColumns, variantColumns, skuColumns] = await Promise.all([
+          trx("products").columnInfo(),
           trx("product_variants").columnInfo(),
           trx("inventory_skus").columnInfo(),
         ]);
+        const hasProductColumn = (name) =>
+          Object.prototype.hasOwnProperty.call(productColumns, name);
         const hasVariantColumn = (name) =>
           Object.prototype.hasOwnProperty.call(variantColumns, name);
         const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
@@ -621,6 +641,30 @@ router.put(
             }
           }
         }
+
+        if (hasProductColumn("status") && hasProductColumn("is_active")) {
+          const productSnapshot = await trx("products")
+            .select("id", "status", "is_active")
+            .where({ id: req.params.id })
+            .first();
+          const normalizedStatus = normalizeProductStatusValue(productSnapshot?.status);
+          if (normalizedStatus) {
+            const expectedIsActive = normalizedStatus === PRODUCT_STATUS_ACTIVE;
+            const currentIsActive =
+              productSnapshot?.is_active === true ||
+              productSnapshot?.is_active === "true" ||
+              productSnapshot?.is_active === 1 ||
+              productSnapshot?.is_active === "1";
+            if (currentIsActive !== expectedIsActive) {
+              const productPatch = { is_active: expectedIsActive };
+              if (hasProductColumn("updated_at")) {
+                productPatch.updated_at = trx.fn.now();
+              }
+              await trx("products").where({ id: req.params.id }).update(productPatch);
+            }
+          }
+        }
+
         return { touchedVariantIds };
       });
 

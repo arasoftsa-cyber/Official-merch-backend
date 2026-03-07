@@ -61,6 +61,125 @@ const ensureAdmin = (req, res) => {
 
 const LINK_POLICY = requirePolicy("admin:ownership:write", "system");
 
+const sortMappingsDeterministically = (rows = []) =>
+  rows
+    .filter(Boolean)
+    .slice()
+    .sort((left, right) => String(left?.id || "").localeCompare(String(right?.id || "")));
+
+const readArtistUserMappings = async (db, userId) =>
+  sortMappingsDeterministically(
+    await db("artist_user_map")
+      .where({ user_id: userId })
+      .select("id", "artist_id", "user_id")
+  );
+
+const deleteArtistUserMappingsByIds = async (db, ids = []) => {
+  const normalizedIds = Array.from(
+    new Set(
+      (Array.isArray(ids) ? ids : [])
+        .map((entry) => String(entry || "").trim())
+        .filter(Boolean)
+    )
+  );
+  if (normalizedIds.length === 0) return 0;
+  return db("artist_user_map").whereIn("id", normalizedIds).delete();
+};
+
+const insertArtistUserMapping = async (db, { artistId, userId }) => {
+  const mappingId = randomUUID();
+  try {
+    await db("artist_user_map").insert({
+      id: mappingId,
+      user_id: userId,
+      artist_id: artistId,
+    });
+    return { inserted: true, mappingId };
+  } catch (err) {
+    if (err?.code === "23505") {
+      return { inserted: false, mappingId: null };
+    }
+    throw err;
+  }
+};
+
+const reconcileArtistUserMapping = async ({ db, artistId, userId }) => {
+  if (!db || !artistId || !userId) {
+    throw new Error("invalid_mapping_input");
+  }
+
+  const run = async (trx) => {
+    const existingRows = await readArtistUserMappings(trx, userId);
+    const sameArtistRows = existingRows.filter((row) => row.artist_id === artistId);
+
+    if (sameArtistRows.length > 0) {
+      const keeper = sameArtistRows[0];
+      const staleIds = existingRows
+        .filter((row) => String(row?.id || "") !== String(keeper.id || ""))
+        .map((row) => row.id);
+      await deleteArtistUserMappingsByIds(trx, staleIds);
+      return {
+        idempotent: staleIds.length === 0,
+        linked: true,
+      };
+    }
+
+    if (existingRows.length > 0) {
+      await deleteArtistUserMappingsByIds(
+        trx,
+        existingRows.map((row) => row.id)
+      );
+    }
+
+    await insertArtistUserMapping(trx, { artistId, userId });
+
+    const afterRows = await readArtistUserMappings(trx, userId);
+    const targetRows = afterRows.filter((row) => row.artist_id === artistId);
+    if (targetRows.length === 0) {
+      const fallback = afterRows[0];
+      if (fallback) {
+        await deleteArtistUserMappingsByIds(
+          trx,
+          afterRows
+            .filter((row) => String(row?.id || "") !== String(fallback.id || ""))
+            .map((row) => row.id)
+        );
+        try {
+          await trx("artist_user_map")
+            .where({ id: fallback.id })
+            .update({ artist_id: artistId });
+        } catch (err) {
+          if (err?.code !== "23505") throw err;
+        }
+      } else {
+        await insertArtistUserMapping(trx, { artistId, userId });
+      }
+    }
+
+    const finalRows = await readArtistUserMappings(trx, userId);
+    const finalTargetRows = finalRows.filter((row) => row.artist_id === artistId);
+    if (finalTargetRows.length === 0) {
+      throw new Error("artist_user_map_reconcile_failed");
+    }
+
+    const finalKeeper = finalTargetRows[0];
+    const staleIds = finalRows
+      .filter((row) => String(row?.id || "") !== String(finalKeeper.id || ""))
+      .map((row) => row.id);
+    await deleteArtistUserMappingsByIds(trx, staleIds);
+
+    return {
+      idempotent: false,
+      linked: true,
+    };
+  };
+
+  if (typeof db.transaction === "function") {
+    return db.transaction(async (trx) => run(trx));
+  }
+  return run(db);
+};
+
 const handleLinkArtistUser = async (req, res, next) => {
   try {
     if (!ensureAdmin(req, res)) return;
@@ -103,18 +222,11 @@ const handleLinkArtistUser = async (req, res, next) => {
     if (user.role !== "artist") {
       return res.status(400).json({ error: "user_not_artist" });
     }
-    const existing = await db("artist_user_map").where({ user_id: user.id }).first();
-    if (existing) {
-      await db("artist_user_map")
-        .where({ user_id: user.id })
-        .update({ artist_id: artistId });
-    } else {
-      await db("artist_user_map").insert({
-        id: randomUUID(),
-        user_id: user.id,
-        artist_id: artistId,
-      });
-    }
+    await reconcileArtistUserMapping({
+      db,
+      artistId,
+      userId: user.id,
+    });
     res.json({ ok: true, userId: user.id, artistId });
   } catch (err) {
     next(err);
@@ -1871,5 +1983,6 @@ module.exports = router;
 module.exports.__test = {
   fetchActiveArtistSubscriptionPayload,
   updateArtistSubscriptionAction,
+  reconcileArtistUserMapping,
 };
 

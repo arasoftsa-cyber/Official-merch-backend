@@ -5,11 +5,16 @@ const {
   detectNewMerchFlow,
   validateNewMerch,
   validateListingPhotoFiles,
+  validateDesignImageFile,
+  normalizeSkuTypes,
+  ONBOARDING_ALLOWED_SKU_TYPES,
   validateProductColors,
   parseMerchMoneyToCents,
   saveProductListingPhotos,
+  saveProductDesignImage,
   replaceProductListingPhotos,
   loadProductListingPhotos,
+  loadProductDesignImage,
   attachListingPhotosToProducts,
 } = require("./catalog.service");
 const {
@@ -29,6 +34,16 @@ const DEFAULT_VARIANT_SIZE = "M";
 const DEFAULT_VARIANT_COLOR = "default";
 const MAX_MULTIPART_BYTES = 15 * 1024 * 1024;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PRODUCT_STATUS_PENDING = "pending";
+const PRODUCT_STATUS_INACTIVE = "inactive";
+const PRODUCT_STATUS_ACTIVE = "active";
+const PRODUCT_STATUS_REJECTED = "rejected";
+const PRODUCT_STATUS_VALUES = new Set([
+  PRODUCT_STATUS_PENDING,
+  PRODUCT_STATUS_INACTIVE,
+  PRODUCT_STATUS_ACTIVE,
+  PRODUCT_STATUS_REJECTED,
+]);
 
 const parseContentDisposition = (line) => {
   const nameMatch = line.match(/name="([^"]+)"/i);
@@ -202,10 +217,50 @@ const normalizeProductPrice = ({ price, priceCents, requirePrice = true } = {}) 
   return {};
 };
 
+const normalizeProductStatusValue = (rawValue) => {
+  if (typeof rawValue !== "string") return null;
+  const normalized = rawValue.trim().toLowerCase();
+  if (!PRODUCT_STATUS_VALUES.has(normalized)) return null;
+  return normalized;
+};
+
+const statusFromIsActive = (isActive) =>
+  isActive ? PRODUCT_STATUS_ACTIVE : PRODUCT_STATUS_INACTIVE;
+
+const normalizeProductStatusFromRecord = (product = {}) => {
+  const statusFromColumn = normalizeProductStatusValue(product?.status);
+  if (statusFromColumn) return statusFromColumn;
+  if (product?.is_active === false || product?.isActive === false) {
+    return PRODUCT_STATUS_INACTIVE;
+  }
+  return PRODUCT_STATUS_ACTIVE;
+};
+
+const canArtistToggleProductStatus = (existingStatus, requestedStatus = null) => {
+  const existingAllowed =
+    existingStatus === PRODUCT_STATUS_ACTIVE || existingStatus === PRODUCT_STATUS_INACTIVE;
+  if (!existingAllowed) return false;
+  if (!requestedStatus) return true;
+  return (
+    requestedStatus === PRODUCT_STATUS_ACTIVE ||
+    requestedStatus === PRODUCT_STATUS_INACTIVE
+  );
+};
+
+const canAdminPatchProductStatus = (existingStatus, requestedStatus = null) => {
+  const existingAllowed =
+    existingStatus === PRODUCT_STATUS_ACTIVE || existingStatus === PRODUCT_STATUS_INACTIVE;
+  if (!existingAllowed) return false;
+  if (!requestedStatus) return true;
+  return (
+    requestedStatus === PRODUCT_STATUS_ACTIVE ||
+    requestedStatus === PRODUCT_STATUS_INACTIVE
+  );
+};
+
 const withStatus = (product = {}) => ({
   ...product,
-  status:
-    product?.is_active === false || product?.isActive === false ? "inactive" : "active",
+  status: normalizeProductStatusFromRecord(product),
 });
 
 const parseNonNegativeInt = (value) => {
@@ -242,22 +297,46 @@ const listArtistProducts = async (req, res) => {
     return res.json({ items: [] });
   }
 
+  const productColumns = await db("products").columnInfo();
+  const selections = [
+    "id",
+    "title",
+    "description",
+    "created_at as createdAt",
+    "created_at as updatedAt",
+    "artist_id as artistId",
+    "is_active",
+    "is_active as isActive",
+    db.raw("is_active as active"),
+    buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\""),
+  ];
+  if (Object.prototype.hasOwnProperty.call(productColumns, "status")) {
+    selections.push("status");
+  }
+  if (Object.prototype.hasOwnProperty.call(productColumns, "rejection_reason")) {
+    selections.push("rejection_reason as rejectionReason");
+  }
+  if (Object.prototype.hasOwnProperty.call(productColumns, "sku_types")) {
+    selections.push("sku_types as skuTypes");
+  }
+
   const artistProductsQuery = db("products")
-    .select(
-      "id",
-      "title",
-      "description",
-      "created_at as createdAt",
-      "created_at as updatedAt",
-      "artist_id as artistId",
-      "is_active",
-      "is_active as isActive",
-      db.raw("is_active as active"),
-      buildSellableMinPriceSubquery(db).wrap("(", ") as \"minVariantPriceCents\"")
-    )
+    .select(selections)
     .where({ artist_id: mapping.artist_id })
     .orderBy("created_at", "desc");
-  const items = await artistProductsQuery;
+  const rows = await artistProductsQuery;
+  const items = await Promise.all(
+    rows.map(async (row) => {
+      const designImageUrl = await loadProductDesignImage(row.id);
+      return withStatus({
+        ...row,
+        designImageUrl,
+        design_image_url: designImageUrl,
+        skuTypes: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+        sku_types: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+      });
+    })
+  );
 
   return res.json({ items });
 };
@@ -270,9 +349,19 @@ const getProduct = async (req, res) => {
   }
   const { product, variants } = row;
   const listingPhotoUrls = await loadProductListingPhotos(id);
+  const designImageUrl = await loadProductDesignImage(id);
   const isAdminView = isAdmin(req.user);
-  if (!isAdminView && product?.is_active === false) {
-    return res.status(404).json(NOT_FOUND);
+  const productStatus = normalizeProductStatusFromRecord(product);
+  if (!isAdminView) {
+    const hasStatusColumn = Object.prototype.hasOwnProperty.call(product || {}, "status");
+    if (hasStatusColumn) {
+      const explicitStatus = normalizeProductStatusValue(product?.status);
+      if (explicitStatus !== PRODUCT_STATUS_ACTIVE) {
+        return res.status(404).json(NOT_FOUND);
+      }
+    } else if (productStatus !== PRODUCT_STATUS_ACTIVE) {
+      return res.status(404).json(NOT_FOUND);
+    }
   }
   const allVariants = Array.isArray(variants) ? variants : [];
   const sellableVariants = allVariants.filter((variant) => Boolean(variant?.effectiveSellable));
@@ -290,6 +379,13 @@ const getProduct = async (req, res) => {
   const primaryPhotoUrl = photos[0] || "";
   const normalizedProduct = {
     ...product,
+    status: productStatus,
+    rejection_reason: product?.rejection_reason ?? null,
+    rejectionReason: product?.rejection_reason ?? null,
+    sku_types: Array.isArray(product?.sku_types) ? product.sku_types : [],
+    skuTypes: Array.isArray(product?.sku_types) ? product.sku_types : [],
+    design_image_url: designImageUrl,
+    designImageUrl,
     listing_photos: photos,
     listingPhotoUrls: photos,
     photoUrls: photos,
@@ -303,6 +399,8 @@ const getProduct = async (req, res) => {
   return res.json({
     product: normalizedProduct,
     listing_photos: photos,
+    design_image_url: designImageUrl,
+    designImageUrl,
     listingPhotoUrl: primaryPhotoUrl,
     photoUrls: photos,
     photos,
@@ -314,6 +412,381 @@ const getProduct = async (req, res) => {
 const getRole = (user) => (user ? (user.role || user.userRole || "").toString().toLowerCase() : "");
 const ADMIN_ROLES = new Set(["admin"]);
 const isAdmin = (user) => ADMIN_ROLES.has(getRole(user));
+const isArtist = (user) => getRole(user) === "artist";
+
+const resolveArtistIdForUser = async (db, userId) => {
+  if (!userId) return null;
+  const mapping = await db("artist_user_map")
+    .select("artist_id")
+    .where({ user_id: userId })
+    .first();
+  return mapping?.artist_id || null;
+};
+
+const parseOnboardingSkuTypes = (body = {}) => {
+  const rawSkuTypes =
+    body?.sku_types ??
+    body?.skuTypes ??
+    body?.sku_types_json ??
+    body?.skuTypesJson ??
+    null;
+  const normalized = normalizeSkuTypes(rawSkuTypes);
+  if (normalized.invalid.length > 0) {
+    return {
+      ok: false,
+      details: [
+        {
+          field: "sku_types",
+          message: `Unsupported SKU type(s): ${normalized.invalid.join(", ")}`,
+        },
+      ],
+    };
+  }
+  if (normalized.skuTypes.length < 1) {
+    return {
+      ok: false,
+      details: [
+        {
+          field: "sku_types",
+          message: "Select at least one SKU type.",
+        },
+      ],
+    };
+  }
+  return { ok: true, skuTypes: normalized.skuTypes };
+};
+
+const createArtistOnboardingRequest = async (req, res) => {
+  if (!isArtist(req.user)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
+  const multipart = await parseMultipartFormData(req);
+  if (multipart?.parseError === "payload_too_large") {
+    return res.status(400).json({
+      error: "validation",
+      details: [{ field: "body", message: "payload too large" }],
+    });
+  }
+  if (multipart?.parseError) {
+    return res.status(400).json({
+      error: "validation",
+      details: [{ field: "body", message: "invalid multipart payload" }],
+    });
+  }
+
+  const body = multipart?.fields || req.body || {};
+  const filesByField = multipart?.filesByField || {};
+  const merchName = String(body.merch_name ?? body.merchName ?? body.title ?? "").trim();
+  const merchStory = String(body.merch_story ?? body.merchStory ?? "").trim();
+
+  const validationDetails = [];
+  if (!merchName) {
+    validationDetails.push({
+      field: "merch_name",
+      message: "Merch name is required.",
+    });
+  }
+  if (!merchStory) {
+    validationDetails.push({
+      field: "merch_story",
+      message: "Merch story is required.",
+    });
+  }
+
+  const skuTypeValidation = parseOnboardingSkuTypes(body);
+  if (!skuTypeValidation.ok) validationDetails.push(...skuTypeValidation.details);
+
+  const designValidation = validateDesignImageFile(filesByField, { required: true });
+  if (!designValidation.ok) validationDetails.push(...designValidation.details);
+
+  if (validationDetails.length > 0) {
+    return res.status(400).json({ error: "validation", details: validationDetails });
+  }
+
+  const db = getDb();
+  const artistId = await resolveArtistIdForUser(db, req.user?.id);
+  if (!artistId) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
+  try {
+    const created = await db.transaction(async (trx) => {
+      const productColumns = await trx("products").columnInfo();
+      const insertPayload = {
+        artist_id: artistId,
+        title: merchName,
+        description: merchStory,
+        is_active: false,
+        created_at: trx.fn.now(),
+      };
+      if (Object.prototype.hasOwnProperty.call(productColumns, "merch_story")) {
+        insertPayload.merch_story = merchStory;
+      }
+      if (Object.prototype.hasOwnProperty.call(productColumns, "status")) {
+        insertPayload.status = PRODUCT_STATUS_PENDING;
+      }
+      if (Object.prototype.hasOwnProperty.call(productColumns, "rejection_reason")) {
+        insertPayload.rejection_reason = null;
+      }
+      if (Object.prototype.hasOwnProperty.call(productColumns, "sku_types")) {
+        insertPayload.sku_types = trx.raw("?::jsonb", [JSON.stringify(skuTypeValidation.skuTypes)]);
+      }
+
+      const [productRow] = await trx("products")
+        .insert(insertPayload)
+        .returning(["id", "created_at"]);
+
+      const designImageUrl = await saveProductDesignImage({
+        trx,
+        productId: productRow.id,
+        file: designValidation.designFile,
+      });
+
+      return {
+        id: productRow.id,
+        createdAt: productRow.created_at,
+        designImageUrl,
+      };
+    });
+
+    return res.status(201).json({
+      ok: true,
+      product_id: created.id,
+      productId: created.id,
+      status: PRODUCT_STATUS_PENDING,
+      designImageUrl: created.designImageUrl,
+      created_at: created.createdAt,
+    });
+  } catch (err) {
+    console.error("[create_artist_onboarding_request] failed", err);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+};
+
+const listAdminOnboardingRequests = async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  const requestedStatus = normalizeProductStatusValue(String(req.query?.status || "").trim());
+  const statusFilter = requestedStatus || PRODUCT_STATUS_PENDING;
+
+  const db = getDb();
+  const productColumns = await db("products").columnInfo();
+  const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
+  const hasRejectionReason = Object.prototype.hasOwnProperty.call(
+    productColumns,
+    "rejection_reason"
+  );
+  const hasSkuTypes = Object.prototype.hasOwnProperty.call(productColumns, "sku_types");
+  if (!hasStatus) {
+    return res.json({ items: [] });
+  }
+
+  const selections = [
+    "p.id as id",
+    "p.artist_id as artistId",
+    "a.name as artistName",
+    "a.handle as artistHandle",
+    "p.title as title",
+    "p.description as description",
+    "p.status as status",
+    "p.is_active as isActive",
+    "p.created_at as createdAt",
+  ];
+  if (hasRejectionReason) {
+    selections.push("p.rejection_reason as rejectionReason");
+  }
+  if (hasSkuTypes) {
+    selections.push("p.sku_types as skuTypes");
+  }
+
+  const rows = await db("products as p")
+    .leftJoin("artists as a", "a.id", "p.artist_id")
+    .select(selections)
+    .where("p.status", statusFilter)
+    .orderBy("p.created_at", "asc");
+
+  const items = await Promise.all(
+    rows.map(async (row) => {
+      const [listingPhotoUrls, designImageUrl] = await Promise.all([
+        loadProductListingPhotos(row.id),
+        loadProductDesignImage(row.id),
+      ]);
+      return withStatus({
+        ...row,
+        artistName: row.artistName || "",
+        artistHandle: row.artistHandle || "",
+        listing_photos: listingPhotoUrls,
+        listingPhotoUrls,
+        designImageUrl,
+        design_image_url: designImageUrl,
+        skuTypes: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+        sku_types: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+      });
+    })
+  );
+
+  return res.json({ items });
+};
+
+const approveOnboardingRequest = async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    return res.status(400).json(BAD_REQUEST);
+  }
+
+  const multipart = await parseMultipartFormData(req);
+  if (multipart?.parseError === "payload_too_large") {
+    return res.status(400).json({
+      error: "validation",
+      details: [{ field: "body", message: "payload too large" }],
+    });
+  }
+  if (multipart?.parseError) {
+    return res.status(400).json({
+      error: "validation",
+      details: [{ field: "body", message: "invalid multipart payload" }],
+    });
+  }
+
+  const filesByField = multipart?.filesByField || {};
+  const listingValidation = validateListingPhotoFiles(filesByField, {
+    required: true,
+    minFiles: 4,
+    maxFiles: 6,
+    maxIndexedField: 6,
+  });
+  if (!listingValidation.ok) {
+    return res.status(400).json({ error: "validation", details: listingValidation.details });
+  }
+  const approveAllowedMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png"]);
+  const invalidApprovalFiles = (Array.isArray(listingValidation.listingFiles) ? listingValidation.listingFiles : []).filter(
+    (file) => {
+      const mime = String(file?.mimetype || "").toLowerCase().trim();
+      const filename = String(file?.originalname || "").toLowerCase().trim();
+      const extensionAllowed = /\.(jpe?g|png)$/i.test(filename);
+      const mimeAllowed = mime ? approveAllowedMimeTypes.has(mime) : false;
+      return !(mimeAllowed || extensionAllowed);
+    }
+  );
+  if (invalidApprovalFiles.length > 0) {
+    return res.status(400).json({
+      error: "validation",
+      details: [
+        {
+          field: "listing_photos",
+          message: "marketplace images must be JPG or PNG",
+        },
+      ],
+    });
+  }
+
+  const db = getDb();
+  const existingProduct = await db("products").where({ id }).first();
+  if (!existingProduct) {
+    return res.status(404).json(NOT_FOUND);
+  }
+  const existingStatus = normalizeProductStatusFromRecord(existingProduct);
+  if (existingStatus !== PRODUCT_STATUS_PENDING) {
+    return res.status(400).json({
+      error: "invalid_status_transition",
+      message: "Only pending requests can be approved.",
+    });
+  }
+
+  try {
+    const result = await db.transaction(async (trx) => {
+      const productColumns = await trx("products").columnInfo();
+      const listingPhotoUrls = await replaceProductListingPhotos({
+        trx,
+        productId: id,
+        files: listingValidation.listingFiles,
+      });
+
+      const patch = {
+        is_active: false,
+      };
+      if (Object.prototype.hasOwnProperty.call(productColumns, "status")) {
+        patch.status = PRODUCT_STATUS_INACTIVE;
+      }
+      if (Object.prototype.hasOwnProperty.call(productColumns, "rejection_reason")) {
+        patch.rejection_reason = null;
+      }
+      if (Object.prototype.hasOwnProperty.call(productColumns, "listing_photos")) {
+        patch.listing_photos = trx.raw("?::jsonb", [JSON.stringify(listingPhotoUrls)]);
+      }
+      await trx("products").where({ id }).update(patch);
+      return { listingPhotoUrls };
+    });
+
+    return res.json({
+      ok: true,
+      product_id: id,
+      productId: id,
+      status: PRODUCT_STATUS_INACTIVE,
+      listingPhotoUrls: result.listingPhotoUrls,
+      listingPhotoUrl: result.listingPhotoUrls[0] || "",
+    });
+  } catch (err) {
+    console.error("[approve_onboarding_request] failed", err);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+};
+
+const rejectOnboardingRequest = async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    return res.status(400).json(BAD_REQUEST);
+  }
+
+  const payload = req.body || {};
+  const rejectionReasonRaw = payload.rejection_reason ?? payload.rejectionReason;
+  const rejectionReason =
+    rejectionReasonRaw === undefined || rejectionReasonRaw === null
+      ? null
+      : String(rejectionReasonRaw).trim() || null;
+
+  const db = getDb();
+  const productColumns = await db("products").columnInfo();
+  const existing = await db("products").where({ id }).first();
+  if (!existing) {
+    return res.status(404).json(NOT_FOUND);
+  }
+  const existingStatus = normalizeProductStatusFromRecord(existing);
+  if (existingStatus !== PRODUCT_STATUS_PENDING) {
+    return res.status(400).json({
+      error: "invalid_status_transition",
+      message: "Only pending requests can be rejected.",
+    });
+  }
+
+  const patch = { is_active: false };
+  if (Object.prototype.hasOwnProperty.call(productColumns, "status")) {
+    patch.status = PRODUCT_STATUS_REJECTED;
+  }
+  if (Object.prototype.hasOwnProperty.call(productColumns, "rejection_reason")) {
+    patch.rejection_reason = rejectionReason;
+  }
+
+  await db("products").where({ id }).update(patch);
+  return res.json({
+    ok: true,
+    product_id: id,
+    productId: id,
+    status: PRODUCT_STATUS_REJECTED,
+    rejection_reason: rejectionReason,
+    rejectionReason,
+  });
+};
 
 const createProduct = async (req, res) => {
   if (!isAdmin(req.user)) {
@@ -388,6 +861,12 @@ const createProduct = async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(productColumns, "merch_story")) {
           insertPayload.merch_story = merchStory;
         }
+        if (Object.prototype.hasOwnProperty.call(productColumns, "status")) {
+          insertPayload.status = PRODUCT_STATUS_INACTIVE;
+        }
+        if (Object.prototype.hasOwnProperty.call(productColumns, "rejection_reason")) {
+          insertPayload.rejection_reason = null;
+        }
         if (Object.prototype.hasOwnProperty.call(productColumns, "mrp_cents")) {
           insertPayload.mrp_cents = mrpCents;
         }
@@ -410,9 +889,13 @@ const createProduct = async (req, res) => {
           insertPayload.colors = trx.raw("?::jsonb", [JSON.stringify(colors)]);
         }
 
+        const productReturning = ["id", "created_at"];
+        if (Object.prototype.hasOwnProperty.call(productColumns, "status")) {
+          productReturning.push("status");
+        }
         const [productRow] = await trx("products")
           .insert(insertPayload)
-          .returning(["id", "created_at"]);
+          .returning(productReturning);
 
         const defaultVariantPrice =
           Number.isInteger(sellingPriceCents) && sellingPriceCents >= 0
@@ -488,6 +971,7 @@ const createProduct = async (req, res) => {
         return {
           productId: productRow.id,
           createdAt: productRow.created_at,
+          status: productRow.status || PRODUCT_STATUS_INACTIVE,
           listingPhotoUrls,
         };
       });
@@ -504,6 +988,7 @@ const createProduct = async (req, res) => {
         product_id: created.productId,
         productId: created.productId,
         created_at: created.createdAt,
+        status: created.status || PRODUCT_STATUS_INACTIVE,
         listingPhotoUrl: created.listingPhotoUrls[0] || "",
         photoUrls: created.listingPhotoUrls,
         listingPhotoUrls: created.listingPhotoUrls,
@@ -623,29 +1108,55 @@ const createProduct = async (req, res) => {
       : status === "active"
       ? true
       : true;
+  const requestedStatus = normalizeProductStatusValue(status);
+  if (typeof status === "string" && !requestedStatus) {
+    return res.status(400).json({
+      error: "validation",
+      details: [{ field: "status", message: "status must be pending, inactive, active, or rejected" }],
+    });
+  }
+  const resolvedStatus = requestedStatus || statusFromIsActive(isActiveFlag);
   const db = getDb();
   let productRow = null;
   let variantRow = null;
 
   try {
     const created = await db.transaction(async (trx) => {
-      const [variantColumns, skuColumns] = await Promise.all([
+      const [productColumns, variantColumns, skuColumns] = await Promise.all([
+        trx("products").columnInfo(),
         trx("product_variants").columnInfo(),
         trx("inventory_skus").columnInfo(),
       ]);
+      const hasProductColumn = (name) =>
+        Object.prototype.hasOwnProperty.call(productColumns, name);
       const hasVariantColumn = (name) =>
         Object.prototype.hasOwnProperty.call(variantColumns, name);
       const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
 
+      const productInsert = {
+        artist_id: artistId,
+        title,
+        description: description || null,
+        is_active: isActiveFlag,
+        created_at: trx.fn.now(),
+      };
+      if (hasProductColumn("status")) {
+        productInsert.status = resolvedStatus;
+      }
+      if (hasProductColumn("rejection_reason")) {
+        productInsert.rejection_reason =
+          resolvedStatus === PRODUCT_STATUS_REJECTED
+            ? body.rejection_reason || body.rejectionReason || null
+            : null;
+      }
+
+      const productReturning = ["id", "title", "description", "is_active as isActive"];
+      if (hasProductColumn("status")) {
+        productReturning.push("status");
+      }
       const [insertedProduct] = await trx("products")
-        .insert({
-          artist_id: artistId,
-          title,
-          description: description || null,
-          is_active: isActiveFlag,
-          created_at: trx.fn.now(),
-        })
-        .returning(["id", "title", "description", "is_active as isActive"]);
+        .insert(productInsert)
+        .returning(productReturning);
 
       if (!insertedProduct) {
         throw Object.assign(new Error("product_create_failed"), { code: "PRODUCT_CREATE_FAILED" });
@@ -915,6 +1426,7 @@ const createProduct = async (req, res) => {
     title: productRow.title,
     description: productRow.description,
     isActive: Boolean(productRow.isActive),
+    status: normalizeProductStatusFromRecord(productRow),
     listingPhotoUrl: listingPhotoUrls[0] || "",
     photoUrls: listingPhotoUrls,
     listingPhotoUrls,
@@ -980,6 +1492,10 @@ const updateProduct = async (req, res) => {
   const existingProduct = await db("products").where({ id }).first();
   if (!existingProduct) {
     return res.status(404).json(NOT_FOUND);
+  }
+  const existingStatus = normalizeProductStatusFromRecord(existingProduct);
+  if (role === "artist" && !canArtistToggleProductStatus(existingStatus, null)) {
+    return res.status(403).json({ error: "forbidden" });
   }
 
   if (typeof payload.title === "string") {
@@ -1187,12 +1703,53 @@ const updateProduct = async (req, res) => {
     }
   }
 
+  let nextStatus = null;
   if (typeof payload.active === "boolean") {
-    patch.is_active = payload.active;
+    nextStatus = statusFromIsActive(payload.active);
   } else if (typeof payload.isActive === "boolean") {
-    patch.is_active = payload.isActive;
+    nextStatus = statusFromIsActive(payload.isActive);
   } else if (typeof payload.status === "string") {
-    patch.is_active = payload.status === "active";
+    nextStatus = normalizeProductStatusValue(payload.status);
+    if (!nextStatus) {
+      return res.status(400).json({
+        error: "validation",
+        details: [{ field: "status", message: "status must be pending, inactive, active, or rejected" }],
+      });
+    }
+  }
+
+  if (role === "artist" && !canArtistToggleProductStatus(existingStatus, nextStatus)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  if (role === "admin" && nextStatus && !canAdminPatchProductStatus(existingStatus, nextStatus)) {
+    return res.status(400).json({
+      error: "invalid_status_transition",
+      message:
+        "Invalid status transition. Pending requests must be approved or rejected from the onboarding queue.",
+    });
+  }
+  if (nextStatus) {
+    patch.is_active = nextStatus === PRODUCT_STATUS_ACTIVE;
+    if (hasColumn("status")) {
+      patch.status = nextStatus;
+    }
+    if (hasColumn("rejection_reason") && nextStatus !== PRODUCT_STATUS_REJECTED) {
+      patch.rejection_reason = null;
+    }
+  }
+
+  if (hasColumn("rejection_reason") && role === "admin") {
+    if (Object.prototype.hasOwnProperty.call(payload, "rejection_reason")) {
+      patch.rejection_reason =
+        payload.rejection_reason === null
+          ? null
+          : String(payload.rejection_reason || "").trim() || null;
+    } else if (Object.prototype.hasOwnProperty.call(payload, "rejectionReason")) {
+      patch.rejection_reason =
+        payload.rejectionReason === null
+          ? null
+          : String(payload.rejectionReason || "").trim() || null;
+    }
   }
 
   const variantPayloadInput = Array.isArray(payload.variants)
@@ -1212,18 +1769,27 @@ const updateProduct = async (req, res) => {
     return res.status(400).json({ error: "no_fields" });
   }
 
+  const productReturningFields = ["id", "title", "description", "is_active as isActive"];
+  if (hasColumn("status")) productReturningFields.push("status");
+  if (hasColumn("rejection_reason")) {
+    productReturningFields.push("rejection_reason as rejectionReason");
+  }
+  if (hasColumn("sku_types")) {
+    productReturningFields.push("sku_types as skuTypes");
+  }
+
   if (Object.keys(patch).length > 0) {
     const updatedRows = await db("products")
       .where({ id })
       .update(patch)
-      .returning(["id", "title", "description", "is_active as isActive"]);
+      .returning(productReturningFields);
     if (!updatedRows || updatedRows.length === 0) {
       return res.status(404).json(NOT_FOUND);
     }
   }
 
   const productRow = await db("products")
-    .select("id", "title", "description", "is_active as isActive")
+    .select(productReturningFields)
     .where({ id })
     .first();
   if (!productRow) {
@@ -1411,12 +1977,17 @@ const updateProduct = async (req, res) => {
   const primaryVariant = formatVariantInventoryRow(primaryVariantRaw);
 
   return res.json({
-    product: {
+    product: withStatus({
       id: productRow.id,
       title: productRow.title,
       description: productRow.description,
       isActive: Boolean(productRow.isActive),
-    },
+      status: productRow.status,
+      rejectionReason: productRow.rejectionReason ?? null,
+      rejection_reason: productRow.rejectionReason ?? null,
+      skuTypes: Array.isArray(productRow.skuTypes) ? productRow.skuTypes : [],
+      sku_types: Array.isArray(productRow.skuTypes) ? productRow.skuTypes : [],
+    }),
     defaultVariant: primaryVariant || null,
   });
 };
@@ -1493,7 +2064,18 @@ module.exports = {
   listProducts,
   listArtistProducts,
   getProduct,
+  createArtistOnboardingRequest,
+  listAdminOnboardingRequests,
+  approveOnboardingRequest,
+  rejectOnboardingRequest,
   createProduct,
   updateProduct,
   updateProductPhotos,
+  __test: {
+    normalizeProductStatusValue,
+    normalizeProductStatusFromRecord,
+    canArtistToggleProductStatus,
+    canAdminPatchProductStatus,
+    parseOnboardingSkuTypes,
+  },
 };

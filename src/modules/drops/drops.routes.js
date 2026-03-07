@@ -886,6 +886,9 @@ router.get("/:handle/products", async (req, res, next) => {
       return res.status(404).json(PUBLIC_NOT_FOUND);
     }
     const db = getDb();
+    const productColumns = await db("products").columnInfo();
+    const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
+    const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
     const productsQuery = db("drop_products as dp")
       .join("products as p", "dp.product_id", "p.id")
       .select(
@@ -895,8 +898,12 @@ router.get("/:handle/products", async (req, res, next) => {
         "p.is_active",
         buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
       )
-      .where("dp.drop_id", drop.id)
-      .andWhere("p.is_active", true);
+      .where("dp.drop_id", drop.id);
+    applyPublicActiveProductFilter(productsQuery, {
+      productRef: "p",
+      hasStatus,
+      hasIsActive,
+    });
     applySellableVariantExists(productsQuery, { productRef: "p.id" });
     applyDropProductOrdering(productsQuery);
     const rows = await productsQuery;
@@ -1048,6 +1055,23 @@ const applyDropProductOrdering = (query, { includeCreatedAt = true } = {}) => {
   query.groupBy("p.id", "p.title", "p.artist_id", "p.is_active");
   query.orderBy("drop_sort_order", "asc");
   query.orderBy("p.created_at", "desc");
+  return query;
+};
+
+const applyPublicActiveProductFilter = (
+  query,
+  { productRef = "p", hasStatus = false, hasIsActive = true } = {}
+) => {
+  if (!query) return query;
+  const statusField = `${productRef}.status`;
+  const activeField = `${productRef}.is_active`;
+  if (hasStatus) {
+    query.andWhere(statusField, "active");
+  } else if (hasIsActive) {
+    query.andWhere(activeField, true);
+  } else {
+    query.whereRaw("1 = 0");
+  }
   return query;
 };
 
@@ -1286,4 +1310,5 @@ router.post(
 module.exports = router;
 module.exports.__test = {
   applyDropProductOrdering,
+  applyPublicActiveProductFilter,
 };

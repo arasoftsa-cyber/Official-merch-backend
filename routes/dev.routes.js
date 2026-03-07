@@ -6,6 +6,36 @@ const { seedUiSmoke } = require("../scripts/seed_ui_smoke");
 const router = require("express").Router();
 
 const isDevMode = process.env.NODE_ENV !== "production";
+const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
+
+const buildUiSmokeSeedEnv = (body = {}) => {
+  const read = (...keys) => {
+    for (const key of keys) {
+      const raw = body?.[key];
+      if (typeof raw === "string" && raw.trim()) return raw.trim();
+    }
+    return null;
+  };
+
+  const nextEnv = { ...process.env };
+  const map = [
+    { env: "ADMIN_EMAIL", keys: ["adminEmail", "admin_email"] },
+    { env: "ADMIN_PASSWORD", keys: ["adminPassword", "admin_password"] },
+    { env: "ARTIST_EMAIL", keys: ["artistEmail", "artist_email"] },
+    { env: "ARTIST_PASSWORD", keys: ["artistPassword", "artist_password"] },
+    { env: "BUYER_EMAIL", keys: ["buyerEmail", "buyer_email", "fanEmail", "fan_email"] },
+    { env: "BUYER_PASSWORD", keys: ["buyerPassword", "buyer_password", "fanPassword", "fan_password"] },
+    { env: "LABEL_EMAIL", keys: ["labelEmail", "label_email"] },
+    { env: "LABEL_PASSWORD", keys: ["labelPassword", "label_password"] },
+  ];
+
+  for (const entry of map) {
+    const value = read(...entry.keys);
+    if (value) nextEnv[entry.env] = value;
+  }
+
+  return nextEnv;
+};
 
 router.post("/seed-artist-access-lead", async (req, res, next) => {
   if (!isDevMode) {
@@ -202,12 +232,16 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
   const SUPPLIER_SKU = "UI-SMOKE-SUPPLIER-SKU-1";
 
   try {
+    const bootstrap = await seedUiSmoke({ env: buildUiSmokeSeedEnv(req.body || {}) });
     const db = getDb();
     const result = await db.transaction(async (trx) => {
-      const [variantColumns, skuColumns] = await Promise.all([
+      const [productColumns, variantColumns, skuColumns] = await Promise.all([
+        trx("products").columnInfo(),
         trx("product_variants").columnInfo(),
         trx("inventory_skus").columnInfo(),
       ]);
+      const hasProductColumn = (name) =>
+        Object.prototype.hasOwnProperty.call(productColumns, name);
       const hasVariantColumn = (name) =>
         Object.prototype.hasOwnProperty.call(variantColumns, name);
       const hasSkuColumn = (name) =>
@@ -231,24 +265,32 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
         .first("id", "artist_id", "title", "is_active");
 
       if (!product) {
+        const productInsert = {
+          id: randomUUID(),
+          artist_id: artist.id,
+          title: PRODUCT_TITLE,
+          description: PRODUCT_DESCRIPTION,
+          is_active: true,
+          created_at: trx.fn.now(),
+        };
+        if (hasProductColumn("status")) {
+          productInsert.status = "active";
+        }
         const [createdProduct] = await trx("products")
-          .insert({
-            id: randomUUID(),
-            artist_id: artist.id,
-            title: PRODUCT_TITLE,
-            description: PRODUCT_DESCRIPTION,
-            is_active: true,
-            created_at: trx.fn.now(),
-          })
+          .insert(productInsert)
           .returning(["id", "artist_id", "title", "is_active"]);
         product = createdProduct;
       } else {
+        const productUpdate = {
+          is_active: true,
+          description: PRODUCT_DESCRIPTION,
+        };
+        if (hasProductColumn("status")) {
+          productUpdate.status = "active";
+        }
         const [updatedProduct] = await trx("products")
           .where({ id: product.id })
-          .update({
-            is_active: true,
-            description: PRODUCT_DESCRIPTION,
-          })
+          .update(productUpdate)
           .returning(["id", "artist_id", "title", "is_active"]);
         product = updatedProduct || product;
       }
@@ -379,6 +421,16 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
       sku: result.variant.sku,
       inventorySkuId: result.inventorySku?.id || null,
       supplierSku: result.inventorySku?.supplier_sku || null,
+      users: {
+        adminUserId: bootstrap?.adminUser?.id || null,
+        artistUserId: bootstrap?.artistUser?.id || null,
+        buyerUserId: bootstrap?.buyerUser?.id || null,
+        labelUserId: bootstrap?.labelUser?.id || null,
+      },
+      artist: {
+        id: bootstrap?.artist?.id || result.artist?.id || null,
+        handle: bootstrap?.artist?.handle || result.artist?.handle || null,
+      },
       product: result.product,
       variant: result.variant,
       inventorySku: result.inventorySku || null,
@@ -390,13 +442,27 @@ router.post("/seed-ui-smoke-product", async (req, res, next) => {
 
 router.post('/seed-ui-smoke', async (req, res, next) => {
   try {
-    await seedUiSmoke({ env: process.env });
-    return ok(res, { ok: true });
+    const seeded = await seedUiSmoke({ env: buildUiSmokeSeedEnv(req.body || {}) });
+    return ok(res, {
+      ok: true,
+      productId: seeded?.product?.id || null,
+      artistId: seeded?.artist?.id || null,
+      variantId: seeded?.variant?.id || null,
+      dropId: seeded?.drop?.id || null,
+      users: {
+        admin: seeded?.adminUser || null,
+        artist: seeded?.artistUser || null,
+        buyer: seeded?.buyerUser || null,
+        label: seeded?.labelUser || null,
+      },
+    });
   } catch (err) {
     next(err);
   }
 });
 
-console.log("[dev.routes] loaded from", __filename, "routes=", router.stack?.length);
+if (DEBUG_STARTUP) {
+  console.log("[dev.routes] loaded from", __filename, "routes=", router.stack?.length);
+}
 
 module.exports = router;
