@@ -13,7 +13,7 @@ const {
   resolveLabelIdForUser,
   createEmptyDashboardPayload,
   clampOrderLimit,
-} = require("../services/dashboard.service");
+} = require("../services/labels-dashboard.service");
 const { isLabelLinkedToArtist } = require("../utils/ownership");
 
 const ensureLabel = (req, res, next) => {

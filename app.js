@@ -198,12 +198,19 @@ const ensureSeededUserRoles = async () => {
 const startServer = async () => {
   await ensureSeededUserRoles();
   await seedArtistAccessRequestsIfEmpty();
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  return server;
 };
 
-startServer().catch((err) => {
-  console.error("Failed to start server", err);
-  process.exit(1);
-});
+// Start the server only if this file is run directly
+if (require.main === module) {
+  startServer().catch((err) => {
+    console.error("Failed to start server", err);
+    process.exit(1);
+  });
+}
+
+// Export the app for testing
+module.exports = app;

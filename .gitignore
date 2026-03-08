@@ -4,6 +4,8 @@ node_modules/
 !.env.example
 /uploads/
 /src/uploads/
-tests/reports/*
 .env.local
 .env.*.local
+/backups/
+/tests/reports
+/backups
