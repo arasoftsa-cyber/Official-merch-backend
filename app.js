@@ -1,118 +1,42 @@
-require('module-alias/register');
 const express = require("express");
 const helmet = require("helmet");
-const cookieParser = require('cookie-parser');
-let cors;
-try {
-  cors = require("cors");
-} catch (err) {
-  cors = null;
-  console.warn("cors module not available; falling back to inline middleware");
-}
-const authRoutes = require("./src/modules/auth/auth.routes");
-const onboardingRoutes = require("./src/modules/onboarding/onboarding.routes");
-const artistRoutes = require("./src/modules/artists/artist.routes");
-const artistDashboardRoutes = require("./src/modules/artists/dashboard.routes");
-const catalogRouter = require("./src/modules/catalog/catalog.routes");
-const labelRoutes = require("./src/modules/labels/label.routes");
-const labelDashboardRoutes = require("./src/modules/labels/dashboard.routes");
-const dropsRouter = require("./src/modules/drops/drops.routes");
-const ordersRouter = require("./src/modules/orders/orders.routes");
-const adminOrdersRouter = require("./src/modules/orders/admin.routes");
-const paymentsRouter = require("./src/modules/payments/payments.routes");
-const leadsRouter = require("./src/modules/leads/lead.routes");
-const artistAccessRequestsRouter = require("./src/modules/artistAccessRequests/artistAccessRequests.routes");
-const artistAccessRequestsAdminRouter = require("./src/modules/artistAccessRequests/artistAccessRequests.admin.routes");
-const mediaAssetsRouter = require("./src/modules/mediaAssets/mediaAssets.routes");
-const homepageRouter = require("./src/modules/homepage/homepage.routes");
-const adminHomepageRouter = require("./src/modules/homepage/homepage.admin.routes");
-const devRoutesRouter = require("./routes/dev.routes");
+const cors = require("cors");
 const { getDb } = require("./src/core/db/db");
 const { UPLOADS_DIR } = require("./src/core/config/paths");
-const { getUploadRoot, getUploadDir, ensureUploadDir } = require("./src/core/config/uploadPaths");
+const { ensureUploadDir } = require("./src/core/config/uploadPaths");
 const { logRequest } = require("./src/core/http/logger");
 const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
-const { ok, fail } = require("./src/core/http/errorResponse");
-
+const { fail } = require("./src/core/http/errorResponse");
+const router = require("./src/routes/index");
+const cookieParser = require("cookie-parser");
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = process.env.BUILD_ID || new Date().toISOString();
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
-const DEV_ROUTES_ENABLED = !isProduction;
 const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
 const logStartupDebug = (...args) => {
   if (DEBUG_STARTUP) {
     console.log(...args);
   }
 };
-logStartupDebug("[startup]", {
-  env: process.env.NODE_ENV || "",
-  isProduction,
-  buildId: BUILD_ID,
-  pid: process.pid,
-  devRoutesEnabled: DEV_ROUTES_ENABLED,
-});
-const deprecateMiddleware = (message) => (req, _res, next) => {
-  console.warn(`[DEPRECATION] ${message}`);
-  next();
-};
-const LABEL_ALIAS_SUNSET = new Date(Date.now() + 45 * 24 * 60 * 60 * 1000).toUTCString();
-const aliasDeprecationHeaders = ({ sunset, link }) => (req, res, next) => {
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Sunset", sunset);
-  if (link) {
-    res.setHeader("Link", `<${link}>; rel="alternate"`);
-  }
-  next();
-};
-const legacyLabelPrefixWarning = (req, _res, next) => {
-  console.warn(
-    `[deprecation] Legacy label prefix used: ${req.method} ${req.originalUrl}. Use /api/labels/* instead.`
-  );
-  next();
-};
-
-const configuredCorsOrigins = String(process.env.CORS_ORIGINS || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
-const defaultDevOrigins = [
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:5174",
-  "http://127.0.0.1:5174",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
-  "http://localhost:4174",
-  "http://127.0.0.1:4174",
+app.use(cookieParser());
+// 1. Define your allowed domains
+const allowedOrigins = [
+    'http://localhost:5173',
+    process.env.CORS_ORIGINS,
 ];
-const requiredCorsOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
 
-const allowDevLocalhostDefaults = !isProduction && configuredCorsOrigins.length === 0;
-
-const allowedOrigins = new Set(
-  [
-    process.env.CLIENT_URL,
-    ...requiredCorsOrigins,
-    ...configuredCorsOrigins,
-    ...(allowDevLocalhostDefaults ? defaultDevOrigins : []),
-  ].filter(Boolean)
-);
-
-const isOriginAllowed = (origin) => {
-  if (!origin) return true;
-  return allowedOrigins.has(origin);
-};
-
+// 2. Configure CORS options
 const corsOptions = {
-  origin: (origin, callback) => {
-    if (isOriginAllowed(origin)) {
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      callback(new Error("Not allowed by CORS"));
+      callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -127,6 +51,8 @@ const corsOptions = {
   credentials: true,
 };
 
+// 3. Apply the middleware
+app.use(cors(corsOptions));
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -149,433 +75,15 @@ app.use(helmet({
     preload: true
   } : false,
 }));
-app.use(cookieParser());
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
-if (cors) {
-  app.use(cors(corsOptions));
-  app.options(/.*/, cors(corsOptions));
-}
 app.use("/uploads", express.static(UPLOADS_DIR));
-logStartupDebug("[static] uploads served from", UPLOADS_DIR);
 ensureUploadDir("products");
-if (!isProduction) {
-  logStartupDebug("[uploads] root:", getUploadRoot());
-  logStartupDebug("[uploads] products:", getUploadDir("products"));
-}
 app.use(attachAuthUser);
 app.use(requestId);
 app.use(logRequest);
 
-app.use((req, res, next) => {
-  res.setHeader("X-Build", BUILD_ID);
-  next();
-});
-
-const mountedRoutes = [];
-
-const normalizeMountPath = (layer) => {
-  if (layer?.path && typeof layer.path === "string") {
-    return layer.path;
-  }
-  const source = layer?.regexp?.source;
-  if (!source || source === "^\\/?(?=\\/|$)") {
-    return "";
-  }
-
-  let path = source
-    .replace(/\\\//g, "/")
-    .replace(/\\\./g, ".")
-    .replace(/\(\?:\(\[\^\\\/]\+\?\)\)/g, ":param")
-    .replace(/\(\?:\(\[\^\/]\+\?\)\)/g, ":param")
-    .replace(/\(\?:\[\^\/]\+\?\)/g, ":param")
-    .replace(/\(\?:\[\^\\\/]\+\?\)/g, ":param")
-    .replace(/\(\?:\(\[\^\/]\+\)\)/g, ":param")
-    .replace(/\(\?:\(\[\^\\\/]\+\)\)/g, ":param")
-    .replace(/\(\?:\[\^\/]\+\)/g, ":param")
-    .replace(/\(\?:\[\^\\\/]\+\)/g, ":param")
-    .replace(/\\\/\?\(\?=\/\|\$\)/g, "")
-    .replace(/\/\?\(\?=\/\|\$\)/g, "")
-    .replace(/\(\?=\/\|\$\)/g, "")
-    .replace(/\\\/\?\$/g, "")
-    .replace(/\\\/\?/g, "/")
-    .replace(/\$$/, "")
-    .replace(/^\^/, "");
-
-  if (path === "/") return "";
-  if (!path.startsWith("/")) {
-    path = `/${path}`;
-  }
-  return path.replace(/\/{2,}/g, "/").replace(/\/$/, "");
-};
-
-const collectRoutes = (stack, prefix = "") => {
-  const rows = [];
-  if (!Array.isArray(stack)) return rows;
-
-  for (const layer of stack) {
-    if (layer?.route?.path) {
-      const methods = Object.keys(layer.route.methods || {})
-        .filter((method) => layer.route.methods[method])
-        .map((method) => method.toUpperCase());
-      const routePaths = Array.isArray(layer.route.path)
-        ? layer.route.path
-        : [layer.route.path];
-
-      for (const method of methods) {
-        for (const routePath of routePaths) {
-          const joined = `${prefix}${routePath}`.replace(/\/{2,}/g, "/");
-          rows.push({ method, path: joined });
-        }
-      }
-      continue;
-    }
-
-    if (layer?.name === "router" && Array.isArray(layer?.handle?.stack)) {
-      const mount = normalizeMountPath(layer);
-      rows.push(...collectRoutes(layer.handle.stack, `${prefix}${mount}`));
-    }
-  }
-
-  return rows;
-};
-
-const collectRouterDirectRoutes = (router) => {
-  if (!router || !Array.isArray(router.stack)) return [];
-  const rows = [];
-  for (const layer of router.stack) {
-    if (!layer?.route?.path) continue;
-    const methods = Object.keys(layer.route.methods || {})
-      .filter((method) => layer.route.methods[method])
-      .map((method) => method.toUpperCase());
-    const routePaths = Array.isArray(layer.route.path)
-      ? layer.route.path
-      : [layer.route.path];
-    for (const method of methods) {
-      for (const routePath of routePaths) {
-        rows.push({ method, path: String(routePath) });
-      }
-    }
-  }
-  return rows;
-};
-
-mountedRoutes.push("/api/auth");
-app.use("/api/auth", authRoutes);
-mountedRoutes.push("/auth");
-app.use("/auth", authRoutes);
-
-mountedRoutes.push("/api/admin/provisioning");
-app.use("/api/admin/provisioning", onboardingRoutes);
-
-mountedRoutes.push("/api/artists");
-app.use("/api/artists", artistRoutes);
-
-mountedRoutes.push("/api/artist/dashboard");
-app.use("/api/artist/dashboard", artistDashboardRoutes);
-mountedRoutes.push("/api (catalog)");
-app.use("/api", catalogRouter);
-
-mountedRoutes.push("/api/labels");
-app.use("/api/labels", labelRoutes);
-
-mountedRoutes.push("/api/labels/dashboard");
-app.use("/api/labels/dashboard", labelDashboardRoutes);
-mountedRoutes.push("/api/labels");
-app.use("/api/labels", labelDashboardRoutes);
-mountedRoutes.push("/api/label/dashboard (alias)");
-app.use(
-  "/api/label/dashboard",
-  aliasDeprecationHeaders({
-    sunset: LABEL_ALIAS_SUNSET,
-    link: "/api/labels/dashboard",
-  }),
-  legacyLabelPrefixWarning,
-  labelDashboardRoutes
-);
-mountedRoutes.push("/api/label (alias)");
-app.use(
-  "/api/label",
-  aliasDeprecationHeaders({
-    sunset: LABEL_ALIAS_SUNSET,
-    link: "/api/labels",
-  }),
-  legacyLabelPrefixWarning,
-  labelDashboardRoutes
-);
-mountedRoutes.push("/api/drops");
-app.use("/api/drops", dropsRouter);
-mountedRoutes.push("/api/artist/drops");
-app.use("/api/artist/drops", dropsRouter);
-mountedRoutes.push("/api/admin/drops");
-app.use("/api/admin/drops", dropsRouter);
-mountedRoutes.push("/api/partner/admin/drops (alias)");
-app.use(
-  "/api/partner/admin/drops",
-  aliasDeprecationHeaders({
-    sunset: "2026-04-16T00:00:00.000Z",
-    link: "/api/admin/drops",
-  }),
-  deprecateMiddleware("/api/partner/admin/drops -> /api/admin/drops"),
-  dropsRouter
-);
-
-mountedRoutes.push("/api/orders");
-app.use("/api/orders", ordersRouter);
-
-mountedRoutes.push("/api/admin");
-app.use("/api/admin", adminOrdersRouter);
-
-mountedRoutes.push("/api/payments");
-app.use("/api/payments", paymentsRouter);
-
-mountedRoutes.push("/api/leads");
-app.use("/api/leads", leadsRouter);
-
-const productVariantsRouter = require("./src/modules/catalog/productVariants.routes");
-mountedRoutes.push("/api/products");
-app.use("/api", productVariantsRouter);
-
-mountedRoutes.push("/api/artist-access-requests");
-app.use("/api/artist-access-requests", artistAccessRequestsRouter);
-
-mountedRoutes.push("/api/media-assets");
-app.use("/api/media-assets", mediaAssetsRouter);
-
-mountedRoutes.push("/api/admin/artist-access-requests");
-app.use("/api/admin/artist-access-requests", artistAccessRequestsAdminRouter);
-
-mountedRoutes.push("/api/homepage");
-app.use("/api/homepage", homepageRouter);
-
-mountedRoutes.push("/api/admin/homepage");
-app.use("/api/admin/homepage", adminHomepageRouter);
-
-if (DEV_ROUTES_ENABLED) {
-  const requireDevAdmin = (req, res, next) => {
-    if (!req.user) {
-      return fail(res, 401, "unauthorized", "Authentication required");
-    }
-    if (req.user.role !== "admin") {
-      return fail(res, 403, "forbidden", "Admin access required");
-    }
-    return next();
-  };
-
-  mountedRoutes.push('/api/dev');
-  app.use('/api/dev', requireDevAdmin, devRoutesRouter);
-  logStartupDebug("DEV_ROUTES_MOUNTED /api/dev", {
-    nodeEnv: process.env.NODE_ENV,
-    enabled: DEV_ROUTES_ENABLED,
-  });
-
-  app.get("/api/dev/_routes", requireDevAdmin, (req, res) => {
-    const stack = app?._router?.stack || app?.router?.stack || [];
-    const routes = collectRoutes(stack);
-    const devRoutes = collectRouterDirectRoutes(devRoutesRouter);
-    const key = (row) => `${row.method}:${row.path}`;
-    const seen = new Set(routes.map(key));
-    for (const row of devRoutes) {
-      const routeKey = key(row);
-      if (!seen.has(routeKey)) {
-        seen.add(routeKey);
-        routes.push(row);
-      }
-    }
-    return ok(res, routes);
-  });
-}
-
-app.get("/api/_meta/dashboards", (req, res) => {
-  res.json({
-    artist: ["/api/artist/dashboard/summary", "/api/artist/dashboard/orders"],
-    label: ["/api/labels/dashboard/summary", "/api/labels/dashboard/orders"],
-    admin: ["/api/admin/dashboard/summary", "/api/admin/dashboard/orders"],
-    buyer: ["/api/orders/my", "/api/orders/:id", "/api/orders/:id/events"],
-  });
-});
-
-let hasLoggedPartnerAdminLeadsSql = false;
-const ALLOWED_LEAD_STATUSES = new Set(["new", "contacted", "converted", "ignored"]);
-
-const listAdminLeads = async (req, res, next) => {
-  try {
-    if (req.user?.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const db = getDb();
-    const source =
-      typeof req.query.source === "string" && req.query.source.trim().length > 0
-        ? req.query.source.trim()
-        : null;
-
-    const query = db("leads")
-      .select(
-        "id",
-        "source",
-        "drop_handle",
-        "name",
-        "email",
-        "phone",
-        "status",
-        "admin_note",
-        "created_at",
-        "updated_at",
-        db.raw("COALESCE((answers_json->>'score')::int, 0) AS score"),
-        db.raw("COALESCE((answers_json->>'maxScore')::int, 0) AS \"maxScore\"")
-      )
-      .orderByRaw("COALESCE((answers_json->>'score')::int, 0) DESC NULLS LAST")
-      .orderBy("created_at", "desc");
-
-    if (source) {
-      query.where("source", source);
-    }
-
-    if (!hasLoggedPartnerAdminLeadsSql) {
-      hasLoggedPartnerAdminLeadsSql = true;
-      const sqlPreview = query.clone().toSQL().toNative();
-      console.log("[admin leads sql]", sqlPreview.sql, sqlPreview.bindings);
-    }
-
-    const rows = await query;
-
-    return res.json(
-      rows.map((row) => ({
-        id: row.id,
-        source: row.source,
-        drop_handle: row.drop_handle,
-        name: row.name,
-        email: row.email,
-        phone: row.phone,
-        status: row.status,
-        admin_note: row.admin_note,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        score: row.score,
-        maxScore: row.maxScore,
-      }))
-    );
-  } catch (err) {
-    next(err);
-  }
-};
-
-const patchAdminLead = async (req, res, next) => {
-  try {
-    if (req.user?.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const leadId = req.params.id;
-    if (!leadId) {
-      return res.status(400).json({ error: "invalid_request" });
-    }
-
-    const { status, adminNote } = req.body || {};
-    const updates = {};
-
-    if (typeof status !== "undefined") {
-      const normalizedStatus = String(status).trim().toLowerCase();
-      if (!ALLOWED_LEAD_STATUSES.has(normalizedStatus)) {
-        return res.status(400).json({
-          error: "invalid_status",
-          allowed: Array.from(ALLOWED_LEAD_STATUSES),
-        });
-      }
-      updates.status = normalizedStatus;
-    }
-
-    if (typeof adminNote !== "undefined") {
-      updates.admin_note = adminNote ? String(adminNote) : null;
-    }
-
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: "invalid_request" });
-    }
-
-    updates.updated_at = getDb().fn.now();
-
-    const db = getDb();
-    const updated = await db("leads")
-      .where({ id: leadId })
-      .update(updates)
-      .returning([
-        "id",
-        "source",
-        "drop_handle",
-        "name",
-        "email",
-        "phone",
-        "status",
-        "admin_note",
-        "created_at",
-        "updated_at",
-      ]);
-
-    const row = Array.isArray(updated) ? updated[0] : null;
-    if (!row) {
-      return res.status(404).json({ error: "lead_not_found" });
-    }
-
-    return res.json({
-      id: row.id,
-      source: row.source,
-      drop_handle: row.drop_handle,
-      name: row.name,
-      email: row.email,
-      phone: row.phone,
-      status: row.status,
-      admin_note: row.admin_note,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-const adminLeadsRouter = express.Router();
-adminLeadsRouter.get("/", listAdminLeads);
-adminLeadsRouter.patch("/:id", express.json(), patchAdminLead);
-
-mountedRoutes.push("/api/admin/leads");
-app.use("/api/admin/leads", adminLeadsRouter);
-mountedRoutes.push("/api/partner/admin/leads (alias)");
-app.use(
-  "/api/partner/admin/leads",
-  aliasDeprecationHeaders({
-    sunset: "2026-04-16T00:00:00.000Z",
-    link: "/api/admin/leads",
-  }),
-  deprecateMiddleware("/api/partner/admin/leads -> /api/admin/leads"),
-  adminLeadsRouter
-);
-
-app.get("/health", async (_req, res) => {
-  let timeoutId = null;
-  try {
-    const db = getDb();
-    const dbProbe = db.raw("select 1");
-    const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error("db_health_timeout")), 1500);
-    });
-    await Promise.race([dbProbe, timeout]);
-    return res.json({
-      ok: true,
-      buildId: BUILD_ID,
-      db: "ok",
-    });
-  } catch (_err) {
-    return res.status(503).json({
-      ok: false,
-      buildId: BUILD_ID,
-      db: "fail",
-    });
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-});
+app.use("/api", router);
 
 app.use((err, req, res, next) => {
   void next;
@@ -599,15 +107,6 @@ process.on("uncaughtException", (error) => {
   console.error("Uncaught Exception:", error);
 });
 
-app.get("/__routes", (req, res) => {
-  res.json({
-    ok: true,
-    port: PORT,
-    hasAuthRoutes: mountedRoutes.includes("/api/auth"),
-    mountedRoutes,
-    notes: "If hasAuthRoutes=false then /api/auth is not mounted in this running server",
-  });
-});
 
 const seedArtistAccessRequestsIfEmpty = async () => {
   if (process.env.NODE_ENV !== "development") return;
