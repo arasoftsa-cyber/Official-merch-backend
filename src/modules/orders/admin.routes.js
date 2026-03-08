@@ -1086,6 +1086,7 @@ const fetchAdminArtistDetailPayload = async (db, artistId) => {
       Object.prototype.hasOwnProperty.call(artistColumns, "email") ||
       (hasArtistUserMap && hasUsersTable),
     canEditStatus: Object.prototype.hasOwnProperty.call(artistColumns, "status"),
+    canEditFeatured: Object.prototype.hasOwnProperty.call(artistColumns, "is_featured"),
     canEditPhone:
       Object.prototype.hasOwnProperty.call(artistColumns, "phone") || hasRequestsTable,
     canEditAboutMe: Object.prototype.hasOwnProperty.call(artistColumns, "about_me"),
