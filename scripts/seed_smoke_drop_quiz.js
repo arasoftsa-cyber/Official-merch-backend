@@ -21,6 +21,7 @@ const SMOKE_PRODUCT_TITLE = "UI Smoke Featured Product";
 const LEGACY_SMOKE_PRODUCT_TITLE = "Seed Artist Tee";
 const SMOKE_PRODUCT_DESCRIPTION = "Deterministic product for smoke drop quiz flows";
 const SMOKE_VARIANT_SKU = "UI-SMOKE-FEATURED-SKU-1";
+const SMOKE_SUPPLIER_SKU = "UI-SMOKE-FEATURED-SUPPLIER-SKU-1";
 const SMOKE_DROP_HANDLE = "ui-smoke-featured-drop";
 const SMOKE_DROP_TITLE = "UI Smoke Featured Drop";
 const SMOKE_DROP_DESCRIPTION = "Deterministic published drop for UI smoke flows";
@@ -180,45 +181,124 @@ const resolveSmokeProduct = async (trx, artistId, options = {}) => {
   return createdProduct;
 };
 
+const ensureSmokeInventorySku = async (trx) => {
+  const hasSkuTable = await trx.schema.hasTable("inventory_skus");
+  if (!hasSkuTable) return null;
+
+  const skuColumns = await trx("inventory_skus").columnInfo();
+  const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
+  const selectColumns = ["id", "supplier_sku", "stock", "is_active"];
+  if (hasSkuColumn("merch_type")) selectColumns.push("merch_type");
+  if (hasSkuColumn("size")) selectColumns.push("size");
+  if (hasSkuColumn("color")) selectColumns.push("color");
+
+  const existing = await trx("inventory_skus")
+    .where({ supplier_sku: SMOKE_SUPPLIER_SKU })
+    .first(...selectColumns);
+
+  if (existing) {
+    const patch = {
+      is_active: true,
+      stock: trx.raw("GREATEST(stock, 3)"),
+    };
+    if (hasSkuColumn("merch_type")) patch.merch_type = "regular_tshirt";
+    if (hasSkuColumn("quality_tier")) patch.quality_tier = "standard";
+    if (hasSkuColumn("size")) patch.size = "M";
+    if (hasSkuColumn("color")) patch.color = "black";
+    if (hasSkuColumn("updated_at")) patch.updated_at = trx.fn.now();
+
+    const [updated] = await trx("inventory_skus")
+      .where({ id: existing.id })
+      .update(patch)
+      .returning(selectColumns);
+    return updated || existing;
+  }
+
+  const payload = {
+    id: randomUUID(),
+    supplier_sku: SMOKE_SUPPLIER_SKU,
+    merch_type: "regular_tshirt",
+    quality_tier: "standard",
+    size: "M",
+    color: "black",
+    stock: 3,
+    is_active: true,
+    created_at: trx.fn.now(),
+  };
+  if (hasSkuColumn("updated_at")) payload.updated_at = trx.fn.now();
+  if (hasSkuColumn("metadata")) {
+    payload.metadata = trx.raw("?::jsonb", [JSON.stringify({ source: "seed_smoke_drop_quiz" })]);
+  }
+
+  const [created] = await trx("inventory_skus")
+    .insert(payload)
+    .returning(selectColumns);
+  return created || payload;
+};
+
 const ensureSmokeVariant = async (trx, productId) => {
+  const variantColumns = await trx("product_variants").columnInfo();
+  const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
+  const inventorySku = await ensureSmokeInventorySku(trx);
+  if (hasVariantColumn("inventory_sku_id") && !inventorySku?.id) {
+    throw new Error("seed_smoke_drop_quiz requires a valid inventory_sku_id mapping");
+  }
+
+  const selectColumns = ["id", "product_id", "sku", "size", "color", "price_cents", "stock"];
+  if (hasVariantColumn("inventory_sku_id")) selectColumns.push("inventory_sku_id");
+  if (hasVariantColumn("selling_price_cents")) selectColumns.push("selling_price_cents");
+  if (hasVariantColumn("is_listed")) selectColumns.push("is_listed");
+
   let variant = await trx("product_variants")
     .where({ sku: SMOKE_VARIANT_SKU })
-    .first("id", "product_id", "sku", "size", "color", "price_cents", "stock");
+    .first(...selectColumns);
 
   if (!variant) {
     variant = await trx("product_variants")
       .where({ product_id: productId })
       .whereRaw("lower(size) = 'm'")
       .whereRaw("lower(color) = 'black'")
-      .first("id", "product_id", "sku", "size", "color", "price_cents", "stock");
+      .first(...selectColumns);
   }
 
   if (!variant) {
-    const [createdVariant] = await trx("product_variants")
-      .insert({
-        id: randomUUID(),
-        product_id: productId,
-        sku: SMOKE_VARIANT_SKU,
-        size: "M",
-        color: "black",
-        price_cents: 400,
-        stock: 3,
-        created_at: trx.fn.now(),
-      })
-      .returning(["id", "product_id", "sku", "size", "color", "price_cents", "stock"]);
-    return createdVariant;
-  }
-
-  const [updatedVariant] = await trx("product_variants")
-    .where({ id: variant.id })
-    .update({
+    const payload = {
+      id: randomUUID(),
       product_id: productId,
+      sku: SMOKE_VARIANT_SKU,
       size: "M",
       color: "black",
       price_cents: 400,
       stock: 3,
-    })
-    .returning(["id", "product_id", "sku", "size", "color", "price_cents", "stock"]);
+      created_at: trx.fn.now(),
+    };
+    if (hasVariantColumn("inventory_sku_id")) payload.inventory_sku_id = inventorySku.id;
+    if (hasVariantColumn("selling_price_cents")) payload.selling_price_cents = 400;
+    if (hasVariantColumn("is_listed")) payload.is_listed = true;
+    if (hasVariantColumn("updated_at")) payload.updated_at = trx.fn.now();
+
+    const [createdVariant] = await trx("product_variants")
+      .insert(payload)
+      .returning(selectColumns);
+    return createdVariant;
+  }
+
+  const patch = {
+    product_id: productId,
+    size: "M",
+    color: "black",
+    price_cents: 400,
+    stock: 3,
+  };
+  if (hasVariantColumn("inventory_sku_id")) patch.inventory_sku_id = inventorySku.id;
+  if (hasVariantColumn("selling_price_cents")) patch.selling_price_cents = 400;
+  if (hasVariantColumn("is_listed")) patch.is_listed = true;
+  if (hasVariantColumn("updated_at")) patch.updated_at = trx.fn.now();
+
+  const [updatedVariant] = await trx("product_variants")
+    .where({ id: variant.id })
+    .update(patch)
+    .returning(selectColumns);
   return updatedVariant || variant;
 };
 

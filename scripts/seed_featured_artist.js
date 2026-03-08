@@ -66,6 +66,7 @@ const loadSeedConfig = () => {
 };
 
 const SEED_CONFIG = loadSeedConfig();
+const SEED_SUPPLIER_SKU = "SMOKE-FEATURED-SUPPLIER-SKU-1";
 
 const ensureUser = async (db, { id, email, role, password }) => {
   const passwordHash = await hashPassword(password);
@@ -89,6 +90,61 @@ const ensureUser = async (db, { id, email, role, password }) => {
     })
     .returning(["id", "email", "role"]);
   return created;
+};
+
+const ensureInventorySku = async (db) => {
+  const hasSkuTable = await db.schema.hasTable("inventory_skus");
+  if (!hasSkuTable) return null;
+
+  const skuColumns = await db("inventory_skus").columnInfo();
+  const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
+  const selectColumns = ["id", "supplier_sku", "stock", "is_active"];
+  if (hasSkuColumn("merch_type")) selectColumns.push("merch_type");
+  if (hasSkuColumn("size")) selectColumns.push("size");
+  if (hasSkuColumn("color")) selectColumns.push("color");
+
+  const existing = await db("inventory_skus")
+    .where({ supplier_sku: SEED_SUPPLIER_SKU })
+    .first(...selectColumns);
+
+  if (existing) {
+    const patch = {
+      is_active: true,
+      stock: db.raw("GREATEST(stock, 20)"),
+    };
+    if (hasSkuColumn("merch_type")) patch.merch_type = "regular_tshirt";
+    if (hasSkuColumn("quality_tier")) patch.quality_tier = "standard";
+    if (hasSkuColumn("size")) patch.size = "M";
+    if (hasSkuColumn("color")) patch.color = "Black";
+    if (hasSkuColumn("updated_at")) patch.updated_at = db.fn.now();
+
+    const [updated] = await db("inventory_skus")
+      .where({ id: existing.id })
+      .update(patch)
+      .returning(selectColumns);
+    return updated || existing;
+  }
+
+  const payload = {
+    id: randomUUID(),
+    supplier_sku: SEED_SUPPLIER_SKU,
+    merch_type: "regular_tshirt",
+    quality_tier: "standard",
+    size: "M",
+    color: "Black",
+    stock: 20,
+    is_active: true,
+    created_at: db.fn.now(),
+  };
+  if (hasSkuColumn("updated_at")) payload.updated_at = db.fn.now();
+  if (hasSkuColumn("metadata")) {
+    payload.metadata = db.raw("?::jsonb", [JSON.stringify({ source: "seed_featured_artist" })]);
+  }
+
+  const [created] = await db("inventory_skus")
+    .insert(payload)
+    .returning(selectColumns);
+  return created || payload;
 };
 
 async function runSeed(db) {
@@ -201,35 +257,81 @@ async function runSeed(db) {
     product = updatedProduct || product;
   }
 
+  const variantColumns = await db("product_variants").columnInfo();
+  const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
+  const inventorySku = await ensureInventorySku(db);
+  if (hasVariantColumn("inventory_sku_id") && !inventorySku?.id) {
+    throw new Error("seed_featured_artist requires a valid inventory_sku_id mapping");
+  }
+
   let variant = await db("product_variants")
     .where({ sku: SEED_CONFIG.variantSku })
-    .first("id", "product_id", "sku", "size", "color", "price_cents", "stock");
+    .first(
+      "id",
+      "product_id",
+      "sku",
+      "size",
+      "color",
+      "price_cents",
+      "stock",
+      ...(hasVariantColumn("inventory_sku_id") ? ["inventory_sku_id"] : [])
+    );
 
   if (!variant) {
+    const payload = {
+      id: randomUUID(),
+      product_id: product.id,
+      sku: SEED_CONFIG.variantSku,
+      size: "M",
+      color: "Black",
+      price_cents: 2999,
+      stock: 20,
+      created_at: db.fn.now(),
+    };
+    if (hasVariantColumn("inventory_sku_id")) payload.inventory_sku_id = inventorySku.id;
+    if (hasVariantColumn("selling_price_cents")) payload.selling_price_cents = 2999;
+    if (hasVariantColumn("is_listed")) payload.is_listed = true;
+    if (hasVariantColumn("updated_at")) payload.updated_at = db.fn.now();
+
     const [createdVariant] = await db("product_variants")
-      .insert({
-        id: randomUUID(),
-        product_id: product.id,
-        sku: SEED_CONFIG.variantSku,
-        size: "M",
-        color: "Black",
-        price_cents: 2999,
-        stock: 20,
-        created_at: db.fn.now(),
-      })
-      .returning(["id", "product_id", "sku", "size", "color", "price_cents", "stock"]);
+      .insert(payload)
+      .returning([
+        "id",
+        "product_id",
+        "sku",
+        "size",
+        "color",
+        "price_cents",
+        "stock",
+        ...(hasVariantColumn("inventory_sku_id") ? ["inventory_sku_id"] : []),
+      ]);
     variant = createdVariant;
   } else {
+    const patch = {
+      product_id: product.id,
+      size: "M",
+      color: "Black",
+      price_cents: 2999,
+      stock: db.raw("GREATEST(stock, 20)"),
+    };
+    if (hasVariantColumn("inventory_sku_id")) patch.inventory_sku_id = inventorySku.id;
+    if (hasVariantColumn("selling_price_cents")) patch.selling_price_cents = 2999;
+    if (hasVariantColumn("is_listed")) patch.is_listed = true;
+    if (hasVariantColumn("updated_at")) patch.updated_at = db.fn.now();
+
     const [updatedVariant] = await db("product_variants")
       .where({ id: variant.id })
-      .update({
-        product_id: product.id,
-        size: "M",
-        color: "Black",
-        price_cents: 2999,
-        stock: db.raw("GREATEST(stock, 20)"),
-      })
-      .returning(["id", "product_id", "sku", "size", "color", "price_cents", "stock"]);
+      .update(patch)
+      .returning([
+        "id",
+        "product_id",
+        "sku",
+        "size",
+        "color",
+        "price_cents",
+        "stock",
+        ...(hasVariantColumn("inventory_sku_id") ? ["inventory_sku_id"] : []),
+      ]);
     variant = updatedVariant || variant;
   }
 

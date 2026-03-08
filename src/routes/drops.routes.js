@@ -10,6 +10,10 @@ const {
   isUserLinkedToArtist,
   isLabelLinkedToArtist,
 } = require("../utils/ownership");
+const {
+  buildSellableMinPriceSubquery,
+  applySellableVariantExists,
+} = require("../services/variantAvailability.service");
 
 const router = express.Router();
 
@@ -526,18 +530,19 @@ router.get("/:id/products", async (req, res, next) => {
       return res.status(404).json(NOT_FOUND);
     }
 
-    const rows = await db("drop_products as dp")
+    const productsQuery = db("drop_products as dp")
       .join("products as p", "p.id", "dp.product_id")
-      .leftJoin("product_variants as pv", "pv.product_id", "p.id")
       .select(
         "p.id",
         "p.title",
         "p.artist_id",
-        db.raw("min(pv.price_cents) as price_cents")
+        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
       )
       .where("dp.drop_id", dropId)
       .groupBy("p.id", "p.title", "p.artist_id")
       .orderBy("p.title", "asc");
+    applySellableVariantExists(productsQuery, { productRef: "p.id" });
+    const rows = await productsQuery;
 
     const productIds = rows.map((row) => row.id);
     return res.json({
@@ -622,18 +627,19 @@ router.put("/:id/products", requireAuth, async (req, res, next) => {
       await trx("drops").where({ id: dropId }).update({ updated_at: trx.fn.now() });
     });
 
-    const updatedRows = await db("drop_products as dp")
+    const updatedProductsQuery = db("drop_products as dp")
       .join("products as p", "p.id", "dp.product_id")
-      .leftJoin("product_variants as pv", "pv.product_id", "p.id")
       .select(
         "p.id",
         "p.title",
         "p.artist_id",
-        db.raw("min(pv.price_cents) as price_cents")
+        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
       )
       .where("dp.drop_id", dropId)
       .groupBy("p.id", "p.title", "p.artist_id")
       .orderBy("p.title", "asc");
+    applySellableVariantExists(updatedProductsQuery, { productRef: "p.id" });
+    const updatedRows = await updatedProductsQuery;
 
     const updatedProductIds = updatedRows.map((row) => row.id);
     return res.json({
@@ -880,12 +886,27 @@ router.get("/:handle/products", async (req, res, next) => {
       return res.status(404).json(PUBLIC_NOT_FOUND);
     }
     const db = getDb();
-    const rows = await db("drop_products as dp")
+    const productColumns = await db("products").columnInfo();
+    const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
+    const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
+    const productsQuery = db("drop_products as dp")
       .join("products as p", "dp.product_id", "p.id")
-      .select("p.id", "p.title", "p.artist_id", "p.is_active")
-      .where("dp.drop_id", drop.id)
-      .orderBy("dp.sort_order", "asc")
-      .orderBy("p.created_at", "desc");
+      .select(
+        "p.id",
+        "p.title",
+        "p.artist_id",
+        "p.is_active",
+        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
+      )
+      .where("dp.drop_id", drop.id);
+    applyPublicActiveProductFilter(productsQuery, {
+      productRef: "p",
+      hasStatus,
+      hasIsActive,
+    });
+    applySellableVariantExists(productsQuery, { productRef: "p.id" });
+    applyDropProductOrdering(productsQuery);
+    const rows = await productsQuery;
     res.json({ items: rows.map(formatProduct) });
   } catch (err) {
     next(err);
@@ -1020,7 +1041,38 @@ const formatProduct = (row) => {
     title: row.title,
     artistId: row.artist_id,
     isActive: row.is_active,
+    priceCents: row.price_cents == null ? null : Number(row.price_cents),
   };
+};
+
+const applyDropProductOrdering = (query, { includeCreatedAt = true } = {}) => {
+  if (!query) return query;
+  if (includeCreatedAt) {
+    query.select("p.created_at");
+    query.groupBy("p.created_at");
+  }
+  query.select(query.client.raw("min(dp.sort_order) as drop_sort_order"));
+  query.groupBy("p.id", "p.title", "p.artist_id", "p.is_active");
+  query.orderBy("drop_sort_order", "asc");
+  query.orderBy("p.created_at", "desc");
+  return query;
+};
+
+const applyPublicActiveProductFilter = (
+  query,
+  { productRef = "p", hasStatus = false, hasIsActive = true } = {}
+) => {
+  if (!query) return query;
+  const statusField = `${productRef}.status`;
+  const activeField = `${productRef}.is_active`;
+  if (hasStatus) {
+    query.andWhere(statusField, "active");
+  } else if (hasIsActive) {
+    query.andWhere(activeField, true);
+  } else {
+    query.whereRaw("1 = 0");
+  }
+  return query;
 };
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1256,3 +1308,7 @@ router.post(
 );
 
 module.exports = router;
+module.exports.__test = {
+  applyDropProductOrdering,
+  applyPublicActiveProductFilter,
+};
