@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "migrate:latest": "knex migrate:latest",
-    "start": "node app.js",
+    "start": "nodemon app.js",
     "migrate:rollback": "knex migrate:rollback",
     "migrate:make": "knex migrate:make",
     "backup": "node scripts/backup.js"
@@ -23,6 +23,7 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "knex": "^3.1.0",
+    "nodemon": "^3.1.14",
     "pg": "^8.11.0",
     "zod": "^3.25.76"
   },

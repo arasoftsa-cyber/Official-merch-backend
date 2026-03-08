@@ -3,11 +3,14 @@ const { recordFlag } = require("../../utils/abuseFlags");
 
 const NODE_ENV = String(process.env.NODE_ENV || "").toLowerCase();
 const RATE_LIMIT_DISABLED = process.env.DISABLE_RATE_LIMIT === "1";
-console.log(
-  `[rate-limit] disabled=${RATE_LIMIT_DISABLED} env=${NODE_ENV || ""} flag=${String(
-    process.env.DISABLE_RATE_LIMIT || ""
-  )}`
-);
+const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
+if (DEBUG_STARTUP) {
+  console.log(
+    `[rate-limit] disabled=${RATE_LIMIT_DISABLED} env=${NODE_ENV || ""} flag=${String(
+      process.env.DISABLE_RATE_LIMIT || ""
+    )}`
+  );
+}
 
 const isAuthLimiterBypassRoute = (req) => {
   const smokeHeader = req.headers["x-smoke-test"];

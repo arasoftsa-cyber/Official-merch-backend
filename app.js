@@ -14,7 +14,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
-
+const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
+const logStartupDebug = (...args) => {
+  if (DEBUG_STARTUP) {
+    console.log(...args);
+  }
+};
 app.use(cookieParser());
 // 1. Define your allowed domains
 const allowedOrigins = [
@@ -113,10 +118,10 @@ const seedArtistAccessRequestsIfEmpty = async () => {
     const count =
       (countResult?.rows?.[0]?.count ?? countResult?.[0]?.count ?? 0) || 0;
     if (count > 0) {
-      console.log("artist_access_requests already seeded:", count);
+      logStartupDebug("artist_access_requests already seeded:", count);
       return;
     }
-    console.log("Seeding artist_access_requests...");
+    logStartupDebug("Seeding artist_access_requests...");
     const seedData = [
       {
         artist_name: "Midnight Echo",
@@ -160,7 +165,7 @@ const seedArtistAccessRequestsIfEmpty = async () => {
         ]
       );
     }
-    console.log("Seeded artist_access_requests successfully.");
+    logStartupDebug("Seeded artist_access_requests successfully.");
   } catch (err) {
     console.error("Seed failed:", err);
   }

@@ -1,8 +1,29 @@
 const artistService = require("../services/artist.service");
 const { getDb } = require("../core/db/db");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
+const {
+  buildSellableMinPriceSubquery,
+  applySellableVariantExists,
+} = require("../services/variantAvailability.service");
 
 const NOT_FOUND = { error: "artist_not_found" };
+
+const applyPublicActiveProductFilter = (
+  query,
+  { productRef = "p", hasStatus = false, hasIsActive = true } = {}
+) => {
+  if (!query) return query;
+  const statusField = `${productRef}.status`;
+  const activeField = `${productRef}.is_active`;
+  if (hasStatus) {
+    query.andWhere(statusField, "active");
+  } else if (hasIsActive) {
+    query.andWhere(activeField, true);
+  } else {
+    query.whereRaw("1 = 0");
+  }
+  return query;
+};
 
 const toNullableString = (value) => {
   if (typeof value !== "string") return null;
@@ -99,19 +120,26 @@ const getShelf = async (req, res) => {
   }
 
   const db = getDb();
-  const shelfRows = await db("products as p")
+  const productColumns = await db("products").columnInfo();
+  const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
+  const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
+  const shelfQuery = db("products as p")
     .where("p.artist_id", row.id)
-    .andWhere("p.is_active", true)
     .select(
       "p.id",
       "p.title",
       "p.artist_id",
       "p.is_active",
-      db.raw(
-        "(select min(price_cents) from product_variants pv where pv.product_id = p.id) as price_cents"
-      )
+      buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
     )
     .orderBy("p.created_at", "desc");
+  applyPublicActiveProductFilter(shelfQuery, {
+    productRef: "p",
+    hasStatus,
+    hasIsActive,
+  });
+  applySellableVariantExists(shelfQuery, { productRef: "p.id" });
+  const shelfRows = await shelfQuery;
 
   const cardImageMap = await loadEntityMediaUrlMap(
     "product",
