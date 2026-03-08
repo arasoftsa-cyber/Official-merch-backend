@@ -77,6 +77,40 @@ app.use(helmet({
 }));
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
+
+app.use((req, res, next) => {
+  const ensureJsonUtf8ContentType = () => {
+    const current = res.getHeader("Content-Type");
+    if (!current) {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return;
+    }
+
+    const value = Array.isArray(current) ? current.join("; ") : String(current);
+    const isJsonLike = /(^|;)\s*application\/(?:[a-z0-9.+-]+\+)?json\b/i.test(value);
+    const hasCharset = /;\s*charset=/i.test(value);
+    if (isJsonLike && !hasCharset) {
+      res.setHeader("Content-Type", `${value}; charset=utf-8`);
+    }
+  };
+
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    ensureJsonUtf8ContentType();
+    return originalJson(body);
+  };
+
+  if (typeof res.jsonp === "function") {
+    const originalJsonp = res.jsonp.bind(res);
+    res.jsonp = (body) => {
+      ensureJsonUtf8ContentType();
+      return originalJsonp(body);
+    };
+  }
+
+  next();
+});
+
 app.use("/uploads", express.static(UPLOADS_DIR));
 ensureUploadDir("products");
 app.use(attachAuthUser);
