@@ -1,7 +1,7 @@
 $backendDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location (Resolve-Path "$backendDir\..")
 
-Write-Host "Starting backend migrations and smoke tests..."
+Write-Host "Starting backend migrations and Jest tests..."
 
 Write-Host "Running database migrations..."
 npx knex migrate:latest
@@ -10,12 +10,12 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
-Write-Host "Running backend smoke tests..."
-node tests/smoke_phase1_3.js
+Write-Host "Running backend Jest tests..."
+npm.cmd run test:backend:ci
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "Smoke tests failed."
+  Write-Error "Jest tests failed."
   exit 1
 }
 
-Write-Host "Backend migrations and smoke tests succeeded."
+Write-Host "Backend migrations and Jest tests succeeded."
 exit 0
