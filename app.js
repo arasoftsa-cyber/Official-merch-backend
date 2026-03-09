@@ -24,7 +24,7 @@ app.use(cookieParser());
 // 1. Define your allowed domains
 const allowedOrigins = [
     'http://localhost:5173',
-    process.env.CORS_ORIGINS,
+    process.env.CLIENT_URL,
 ];
 
 // 2. Configure CORS options
