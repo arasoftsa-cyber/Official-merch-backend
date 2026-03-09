@@ -1,5 +1,6 @@
 const artistService = require("../services/artist.service");
 const { getDb } = require("../core/db/db");
+const { getTableColumns, hasTableCached } = require("../core/db/schemaCache");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 const {
   buildSellableMinPriceSubquery,
@@ -67,8 +68,10 @@ const loadEntityMediaUrlMap = async (entityType, entityIds, role = "cover") => {
   }
 
   try {
-    const hasMediaAssets = await db.schema.hasTable("media_assets");
-    const hasEntityLinks = await db.schema.hasTable("entity_media_links");
+    const [hasMediaAssets, hasEntityLinks] = await Promise.all([
+      hasTableCached(db, "media_assets"),
+      hasTableCached(db, "entity_media_links"),
+    ]);
     if (!hasMediaAssets || !hasEntityLinks) {
       return new Map();
     }
@@ -120,7 +123,7 @@ const getShelf = async (req, res) => {
   }
 
   const db = getDb();
-  const productColumns = await db("products").columnInfo();
+  const productColumns = await getTableColumns(db, "products");
   const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
   const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
   const shelfQuery = db("products as p")

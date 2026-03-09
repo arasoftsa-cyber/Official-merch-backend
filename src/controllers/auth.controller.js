@@ -3,6 +3,7 @@
 const { randomUUID } = require("crypto");
 const { hashPassword, verifyPassword } = require("../utils/password");
 const { getDb } = require("../core/db/db");
+const { hasTableCached } = require("../core/db/schemaCache");
 const { ok, fail } = require("../core/http/errorResponse");
 const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLockoutTime } = require("../core/http/accountLockout");
 const authService = require("../services/auth.service");
@@ -54,14 +55,14 @@ const hasPartnerRoleAccess = async (user) => {
 
   const db = getDb();
   if (role === "label") {
-    const hasLabelUsersMap = await db.schema.hasTable("label_users_map");
+    const hasLabelUsersMap = await hasTableCached(db, "label_users_map");
     if (!hasLabelUsersMap) return false;
     const labelLink = await db("label_users_map").where({ user_id: user.id }).first("user_id");
     return Boolean(labelLink);
   }
 
   if (role === "artist") {
-    const hasArtistUserMap = await db.schema.hasTable("artist_user_map");
+    const hasArtistUserMap = await hasTableCached(db, "artist_user_map");
     if (!hasArtistUserMap) return false;
     const artistLink = await db("artist_user_map").where({ user_id: user.id }).first("user_id");
     return Boolean(artistLink);

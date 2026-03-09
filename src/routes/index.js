@@ -56,6 +56,7 @@ router.use("/labels", labelRoutes);
 router.use("/labels/dashboard", labelDashboardRoutes);
 router.use("/label/dashboard", labelDashboardRoutes);
 router.use("/drops", dropsRouter);
+router.use("/admin/drops", dropsRouter);
 router.use("/artist/drops", dropsRouter);
 router.use("/orders", ordersRouter);
 router.use("/payments", paymentsRouter);

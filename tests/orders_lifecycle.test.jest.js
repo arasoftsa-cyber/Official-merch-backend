@@ -713,10 +713,31 @@ describe("orders lifecycle api flows", () => {
     expect(eventsRes.body.items.some((event) => event.type === "placed")).toBe(true);
     expect(eventsRes.body.items.some((event) => event.type === "cancelled")).toBe(true);
 
+    const artistUserId = "00000000-0000-4000-8000-000000009999";
+    const artistCreateRes = await request(app)
+      .post("/api/orders")
+      .set(withUser(artistUserId, "artist"))
+      .send({ productId, productVariantId: variantId, quantity: 1 });
+    expect(artistCreateRes.status).toBe(200);
+    const artistOrderId = artistCreateRes.body?.order?.id;
+    expect(artistOrderId).toBeTruthy();
+
     const artistOrdersRes = await request(app)
       .get("/api/orders/my")
-      .set(withUser("00000000-0000-4000-8000-000000009999", "artist"));
-    expect(artistOrdersRes.status).toBe(403);
+      .set(withUser(artistUserId, "artist"));
+    expect(artistOrdersRes.status).toBe(200);
+    expect(Array.isArray(artistOrdersRes.body?.items)).toBe(true);
+    expect(artistOrdersRes.body.items.some((item) => item.id === artistOrderId)).toBe(true);
+
+    const labelOrdersRes = await request(app)
+      .get("/api/orders/my")
+      .set(withUser("00000000-0000-4000-8000-000000008888", "label"));
+    expect(labelOrdersRes.status).toBe(200);
+
+    const adminOrdersRes = await request(app)
+      .get("/api/orders/my")
+      .set(withUser("00000000-0000-4000-8000-000000007777", "admin"));
+    expect(adminOrdersRes.status).toBe(200);
   });
 
   it("supports pay/confirm idempotency, fulfill/refund, and key forbidden transitions", async () => {

@@ -7,7 +7,11 @@ const request = require("supertest");
 const { getDb } = require("../src/core/db/db");
 const { verifyPassword } = require("../src/utils/password");
 const { createAuthenticatedAgent } = require("./helpers/auth");
-const { buildAdminFixture, credentialsFor } = require("./helpers/fixtures");
+const {
+  buildAdminFixture,
+  buildBuyerFixture,
+  credentialsFor,
+} = require("./helpers/fixtures");
 const { silenceTestLogs } = require("./helpers/logging");
 const { setupMockDb } = require("./helpers/mockDb");
 
@@ -20,6 +24,7 @@ describe("smoke critical path", () => {
   let mockQueryBuilder;
   let restoreLogs = () => {};
   const adminUser = buildAdminFixture();
+  const buyerUser = buildBuyerFixture();
 
   beforeAll(() => {
     restoreLogs = silenceTestLogs(["log", "warn"]);
@@ -64,6 +69,40 @@ describe("smoke critical path", () => {
   it("public metadata route succeeds", async () => {
     const response = await request(app).get("/api/_meta/dashboards");
     expect(response.status).toBe(200);
+  });
+
+  it("admin drops list rejects unauthenticated access", async () => {
+    const response = await request(app).get("/api/admin/drops");
+    expect(response.status).toBe(401);
+    expect(response.body?.error).toBe("unauthorized");
+  });
+
+  it("admin drops list rejects non-admin access", async () => {
+    mockQueryBuilder.first.mockResolvedValue(buyerUser);
+    const { agent, loginResponse } = await createAuthenticatedAgent(
+      app,
+      credentialsFor(buyerUser)
+    );
+    expect(loginResponse.status).toBe(200);
+
+    const response = await agent.get("/api/admin/drops");
+    expect(response.status).toBe(403);
+    expect(response.body?.error).toBe("forbidden");
+  });
+
+  it("admin drops list returns items for admin", async () => {
+    mockQueryBuilder.first.mockResolvedValue(adminUser);
+    mockQueryBuilder._mockResolveValue = [];
+    const { agent, loginResponse } = await createAuthenticatedAgent(
+      app,
+      credentialsFor(adminUser)
+    );
+    expect(loginResponse.status).toBe(200);
+
+    const canonical = await agent.get("/api/admin/drops");
+
+    expect(canonical.status).toBe(200);
+    expect(Array.isArray(canonical.body?.items)).toBe(true);
   });
 
   it("artist access request submission sanity path succeeds", async () => {
