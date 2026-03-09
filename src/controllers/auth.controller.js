@@ -1,64 +1,17 @@
 "use strict";
 
+const { randomUUID } = require("crypto");
 const { hashPassword, verifyPassword } = require("../utils/password");
 const { getDb } = require("../core/db/db");
 const { ok, fail } = require("../core/http/errorResponse");
 const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLockoutTime } = require("../core/http/accountLockout");
 const authService = require("../services/auth.service");
 const userService = require("../services/user.service");
+const oidcService = require("../services/oidc.service");
 
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
 const FAN_ALLOWED_ROLES = new Set(["buyer", "fan"]);
 const authDebugEnabled = process.env.AUTH_DEBUG === "1";
-const ACCESS_COOKIE_NAME = "om_access_token";
-const REFRESH_COOKIE_NAME = "om_refresh_token";
-const ACCESS_COOKIE_MAX_AGE_MS = 15 * 60 * 1000;
-const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const isProduction = process.env.NODE_ENV === "production";
-
-const parseCookies = (cookieHeader) => {
-  return String(cookieHeader || "")
-    .split(";")
-    .map((pair) => pair.trim())
-    .filter(Boolean)
-    .reduce((acc, pair) => {
-      const idx = pair.indexOf("=");
-      if (idx <= 0) return acc;
-      const key = pair.slice(0, idx).trim();
-      const value = pair.slice(idx + 1).trim();
-      if (!key) return acc;
-      acc[key] = decodeURIComponent(value);
-      return acc;
-    }, {});
-};
-
-const getAuthCookieOptions = (maxAge) => ({
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? "none" : "lax",
-  path: "/",
-  maxAge,
-});
-
-const setAuthCookies = (res, tokens) => {
-  res.cookie(ACCESS_COOKIE_NAME, tokens.accessToken, getAuthCookieOptions(ACCESS_COOKIE_MAX_AGE_MS));
-  res.cookie(
-    REFRESH_COOKIE_NAME,
-    tokens.refreshToken,
-    getAuthCookieOptions(REFRESH_COOKIE_MAX_AGE_MS)
-  );
-};
-
-const clearAuthCookies = (res) => {
-  const baseOptions = {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: isProduction ? "none" : "lax",
-    path: "/",
-  };
-  res.clearCookie(ACCESS_COOKIE_NAME, baseOptions);
-  res.clearCookie(REFRESH_COOKIE_NAME, baseOptions);
-};
 
 const logPartnerLogin = (...args) => {
   if (!authDebugEnabled) return;
@@ -130,6 +83,58 @@ const buildAuthResponse = async (user) => {
   };
 };
 
+const getPortalLoginPath = (portal) => (portal === "partner" ? "/partner/login" : "/fan/login");
+
+const appendQuery = (baseUrl, query) => {
+  const url = new URL(baseUrl);
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    url.searchParams.set(key, String(value));
+  }
+  return url.toString();
+};
+
+const redirectToFrontendLogin = (res, { appOrigin, portal, returnTo, portalError, message }) => {
+  const loginPath = getPortalLoginPath(portal);
+  const redirectUrl = appendQuery(`${appOrigin}${loginPath}`, {
+    portalError,
+    message,
+    returnTo,
+  });
+  return res.redirect(302, redirectUrl);
+};
+
+const redirectToFrontendCallback = (res, { appOrigin, portal, returnTo, exchangeCode }) => {
+  const callbackUrl = appendQuery(`${appOrigin}/auth/oidc/callback`, {
+    portal,
+    returnTo,
+    code: exchangeCode,
+  });
+  return res.redirect(302, callbackUrl);
+};
+
+const syncUserOidcProfile = async (user, { sub, avatarUrl, emailVerified }) => {
+  const authProvider = "google";
+  if (!user?.id) return user;
+
+  const currentSub = String(user.oidc_sub || "").trim();
+  const shouldUpdate =
+    !currentSub ||
+    currentSub === String(sub || "").trim() ||
+    !String(user.auth_provider || "").trim();
+
+  if (!shouldUpdate) return user;
+
+  const updated = await userService.updateUserAuthProviderById(user.id, {
+    authProvider,
+    oidcSub: String(sub || "").trim() || null,
+    avatarUrl: avatarUrl || null,
+    emailVerified: typeof emailVerified === "boolean" ? emailVerified : null,
+  });
+
+  return updated || user;
+};
+
 const validatePasswordStrength = (password) => {
   if (typeof password !== "string") return false;
   if (password.length < 12) return false;
@@ -181,7 +186,6 @@ const login = async (req, res) => {
 
     clearFailedAttempts(normalizeEmail);
     const payload = await buildAuthResponse(user);
-    setAuthCookies(res, payload);
     return ok(res, payload);
   } catch (err) {
     console.error("[auth.login] failed", err);
@@ -216,7 +220,6 @@ const partnerLogin = async (req, res) => {
 
     logPartnerLogin("decision", { portal: "partner", userId: user.id, role, allowed: true });
     const payload = await buildAuthResponse(user);
-    setAuthCookies(res, payload);
     return ok(res, payload);
   } catch (err) {
     console.error("[auth.partnerLogin] failed", err);
@@ -270,7 +273,6 @@ const fanLogin = async (req, res) => {
     }
 
     const payload = await buildAuthResponse(user);
-    setAuthCookies(res, payload);
     return ok(res, payload);
   } catch (err) {
     console.error("[auth.fanLogin] failed", err);
@@ -309,7 +311,6 @@ const register = async (req, res) => {
     });
 
     const tokens = await authService.issueAuthTokensForUser({ user });
-    setAuthCookies(res, tokens);
     return res.status(200).json({
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
@@ -325,14 +326,161 @@ const register = async (req, res) => {
   }
 };
 
+const oidcGoogleStart = async (req, res) => {
+  try {
+    const portal = String(req.query?.portal || "").trim().toLowerCase();
+    if (portal !== "fan" && portal !== "partner") {
+      return fail(res, 400, "validation_error", "portal must be fan or partner");
+    }
+    const returnTo = oidcService.toSafeReturnTo(req.query?.returnTo || "", portal);
+    const { authorizationUrl } = await oidcService.buildGoogleAuthorizationUrl({
+      req,
+      portal,
+      returnTo,
+    });
+    return res.redirect(302, authorizationUrl);
+  } catch (err) {
+    if (err?.code === "OIDC_DISABLED") {
+      return fail(res, 404, "not_found", "OIDC authentication is disabled");
+    }
+    if (err?.code === "OIDC_MISCONFIGURED") {
+      return fail(res, 503, "service_unavailable", err.message);
+    }
+    console.error("[auth.oidcGoogleStart] failed", err);
+    return fail(res, 500, "internal_server_error", "Failed to start Google authentication");
+  }
+};
+
+const oidcGoogleCallback = async (req, res) => {
+  let callbackContext = {
+    portal: "fan",
+    returnTo: "/fan",
+    appOrigin: "http://localhost:5173",
+  };
+
+  try {
+    const callbackData = await oidcService.consumeGoogleCallback(req);
+    callbackContext = {
+      portal: callbackData.portal,
+      returnTo: callbackData.returnTo,
+      appOrigin: callbackData.appOrigin,
+    };
+
+    if (!callbackData.email || !callbackData.sub) {
+      return redirectToFrontendLogin(res, {
+        ...callbackContext,
+        portalError: "oidc_profile_incomplete",
+        message: "Google account did not return a usable email profile.",
+      });
+    }
+
+    const existingUser = await findAuthUserByEmail(callbackData.email);
+
+    if (callbackData.portal === "fan") {
+      if (existingUser) {
+        const existingRole = String(existingUser.role || "").toLowerCase();
+        if (!FAN_ALLOWED_ROLES.has(existingRole)) {
+          return redirectToFrontendLogin(res, {
+            ...callbackContext,
+            portalError: "partner_account",
+            message: "This account belongs to the Partner Portal. Use partner login.",
+          });
+        }
+
+        const syncedUser = await syncUserOidcProfile(existingUser, callbackData);
+        const authPayload = await buildAuthResponse(syncedUser);
+        const exchangeCode = oidcService.issueExchangeCode(authPayload);
+        return redirectToFrontendCallback(res, { ...callbackContext, exchangeCode });
+      }
+
+      const generatedPasswordHash = await hashPassword(`oidc:${randomUUID()}`);
+      const createdUser = await userService.createUser({
+        email: callbackData.email,
+        passwordHash: generatedPasswordHash,
+        role: "buyer",
+        authProvider: "google",
+        oidcSub: callbackData.sub,
+        avatarUrl: callbackData.avatarUrl,
+        emailVerified: callbackData.emailVerified,
+      });
+      const authPayload = await buildAuthResponse(createdUser);
+      const exchangeCode = oidcService.issueExchangeCode(authPayload);
+      return redirectToFrontendCallback(res, { ...callbackContext, exchangeCode });
+    }
+
+    if (!existingUser) {
+      return redirectToFrontendLogin(res, {
+        ...callbackContext,
+        portalError: "partner_unknown_account",
+        message: "No approved partner account found for this Google email.",
+      });
+    }
+
+    const existingRole = String(existingUser.role || "").toLowerCase();
+    if (!PARTNER_ALLOWED_ROLES.has(existingRole)) {
+      return redirectToFrontendLogin(res, {
+        ...callbackContext,
+        portalError: "fan_account",
+        message: "Fan accounts cannot sign in to the Partner Portal.",
+      });
+    }
+
+    const canAccessPartner = await hasPartnerRoleAccess(existingUser);
+    if (!canAccessPartner) {
+      return redirectToFrontendLogin(res, {
+        ...callbackContext,
+        portalError: "partner_not_approved",
+        message: "Partner account is not approved yet.",
+      });
+    }
+
+    const syncedUser = await syncUserOidcProfile(existingUser, callbackData);
+    const authPayload = await buildAuthResponse(syncedUser);
+    const exchangeCode = oidcService.issueExchangeCode(authPayload);
+    return redirectToFrontendCallback(res, { ...callbackContext, exchangeCode });
+  } catch (err) {
+    try {
+      if (req?.query?.state) {
+        const parsed = oidcService.parseSignedState(req.query.state);
+        callbackContext = {
+          portal: parsed.portal,
+          returnTo: parsed.returnTo,
+          appOrigin: parsed.appOrigin,
+        };
+      }
+    } catch (_stateErr) {
+      // ignored
+    }
+
+    const fallbackMessage = "Google login failed. Please try again.";
+    return redirectToFrontendLogin(res, {
+      ...callbackContext,
+      portalError: "oidc_failed",
+      message: fallbackMessage,
+    });
+  }
+};
+
+const oidcGoogleExchange = async (req, res) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+    if (!code) {
+      return fail(res, 400, "validation_error", "code is required");
+    }
+    const payload = oidcService.consumeExchangeCode(code);
+    if (!payload) {
+      return fail(res, 401, "invalid_exchange_code", "Invalid or expired OIDC exchange code");
+    }
+    return ok(res, payload);
+  } catch (err) {
+    console.error("[auth.oidcGoogleExchange] failed", err);
+    return fail(res, 500, "internal_server_error", "Failed to finalize Google authentication");
+  }
+};
+
 const refresh = async (req, res) => {
   try {
-    const refreshToken =
-      req.cookies?.refreshToken ||
-      req.cookies?.refresh_token ||
-      req.body?.refreshToken ||
-      req.cookies?.[REFRESH_COOKIE_NAME] ||
-      null;
+    const refreshToken = req.body?.refreshToken || null;
 
     if (!refreshToken) {
       return fail(res, 401, "unauthorized", "missing_refresh_token");
@@ -341,7 +489,6 @@ const refresh = async (req, res) => {
     const rotated = await authService.rotateRefreshToken({
       refreshToken: String(refreshToken).trim(),
     });
-    setAuthCookies(res, rotated);
     return ok(res, {
       accessToken: rotated.accessToken,
       refreshToken: rotated.refreshToken,
@@ -362,14 +509,10 @@ const refresh = async (req, res) => {
 
 const logout = async (req, res) => {
   try {
-    const cookies = parseCookies(req.headers.cookie);
-    const refreshToken = String(
-      req.body?.refreshToken || cookies[REFRESH_COOKIE_NAME] || ""
-    ).trim();
+    const refreshToken = String(req.body?.refreshToken || "").trim();
     if (refreshToken) {
       await authService.revokeRefreshToken({ refreshToken });
     }
-    clearAuthCookies(res);
     return ok(res, { ok: true });
   } catch (err) {
     console.error("[auth.logout] failed", err);
@@ -377,4 +520,15 @@ const logout = async (req, res) => {
   }
 };
 
-module.exports = { ping, login, fanLogin, partnerLogin, register, refresh, logout };
+module.exports = {
+  ping,
+  login,
+  fanLogin,
+  partnerLogin,
+  register,
+  oidcGoogleStart,
+  oidcGoogleCallback,
+  oidcGoogleExchange,
+  refresh,
+  logout,
+};

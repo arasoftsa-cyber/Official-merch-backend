@@ -5,7 +5,18 @@ const rateLimit = require("../core/http/rateLimit");
 const { ok } = require("../core/http/errorResponse");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { requirePolicy } = require("../core/http/policy.middleware");
-const { ping, login, fanLogin, partnerLogin, register, refresh, logout } = require("../controllers/auth.controller");
+const {
+  ping,
+  login,
+  fanLogin,
+  partnerLogin,
+  register,
+  oidcGoogleStart,
+  oidcGoogleCallback,
+  oidcGoogleExchange,
+  refresh,
+  logout,
+} = require("../controllers/auth.controller");
 
 const isProd = process.env.NODE_ENV === "production";
 const loginRateLimiter = rateLimit({
@@ -34,6 +45,9 @@ router.post(
   partnerLogin
 );
 router.post("/register", express.json(), register);
+router.get("/oidc/google/start", oidcGoogleStart);
+router.get("/oidc/google/callback", oidcGoogleCallback);
+router.post("/oidc/google/exchange", express.json(), oidcGoogleExchange);
 router.post("/refresh", express.json(), refresh);
 router.post("/logout", express.json(), logout);
 router.get(

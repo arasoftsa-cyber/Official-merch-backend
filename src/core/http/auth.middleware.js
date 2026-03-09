@@ -1,7 +1,6 @@
 const { verifyToken } = require("../../utils/jwt");
 
 const UNAUTHORIZED = { error: "unauthorized" };
-const ACCESS_COOKIE_NAME = "om_access_token";
 const isProduction = process.env.NODE_ENV === "production";
 const isDevEmailRoleMapEnabled =
   !isProduction &&
@@ -37,34 +36,13 @@ const normalizeRole = (decoded) => {
   return "";
 };
 
-const parseCookies = (cookieHeader) => {
-  return String(cookieHeader || "")
-    .split(";")
-    .map((pair) => pair.trim())
-    .filter(Boolean)
-    .reduce((acc, pair) => {
-      const idx = pair.indexOf("=");
-      if (idx <= 0) return acc;
-      const key = pair.slice(0, idx).trim();
-      const value = pair.slice(idx + 1).trim();
-      if (!key) return acc;
-      acc[key] = decodeURIComponent(value);
-      return acc;
-    }, {});
-};
-
 const getBearerToken = (req) => {
   const authHeader = req.headers.authorization || req.headers.Authorization || "";
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : "";
 };
 
-const resolveToken = (req) => {
-  const bearer = getBearerToken(req);
-  if (bearer) return bearer;
-  const cookies = parseCookies(req.headers.cookie);
-  return cookies[ACCESS_COOKIE_NAME] || "";
-};
+const resolveToken = (req) => getBearerToken(req);
 
 const attachAuthUser = (req, res, next) => {
   void res;
