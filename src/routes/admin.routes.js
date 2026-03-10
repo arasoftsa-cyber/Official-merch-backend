@@ -5,6 +5,7 @@ const { requireAuth } = require("../core/http/auth.middleware");
 const { requirePolicy } = require("../core/http/policy.middleware");
 const { listFlags } = require("../utils/abuseFlags");
 const { createProductWithVariants } = require("../services/catalog.service");
+const { listAdminLeads } = require("../services/lead.service");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 
 const router = express.Router();
@@ -257,6 +258,16 @@ router.get(
   requirePolicy("admin_dashboard:read", "self"),
   handleAdminSummary
 );
+
+router.get("/leads", requireAuth, async (req, res, next) => {
+  try {
+    if (!ensureAdmin(req, res)) return;
+    const leads = await listAdminLeads();
+    return res.json(leads);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 const formatDashboardSummary = async (db) => {
   const statusRows = await db("orders")

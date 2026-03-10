@@ -9,7 +9,6 @@ const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
 const router = require("./src/routes/index");
-const cookieParser = require("cookie-parser");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
@@ -20,7 +19,6 @@ const logStartupDebug = (...args) => {
     console.log(...args);
   }
 };
-app.use(cookieParser());
 // 1. Define your allowed domains
 const allowedOrigins = [
     'http://localhost:5173',
@@ -77,6 +75,40 @@ app.use(helmet({
 }));
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
+
+app.use((req, res, next) => {
+  const ensureJsonUtf8ContentType = () => {
+    const current = res.getHeader("Content-Type");
+    if (!current) {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return;
+    }
+
+    const value = Array.isArray(current) ? current.join("; ") : String(current);
+    const isJsonLike = /(^|;)\s*application\/(?:[a-z0-9.+-]+\+)?json\b/i.test(value);
+    const hasCharset = /;\s*charset=/i.test(value);
+    if (isJsonLike && !hasCharset) {
+      res.setHeader("Content-Type", `${value}; charset=utf-8`);
+    }
+  };
+
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    ensureJsonUtf8ContentType();
+    return originalJson(body);
+  };
+
+  if (typeof res.jsonp === "function") {
+    const originalJsonp = res.jsonp.bind(res);
+    res.jsonp = (body) => {
+      ensureJsonUtf8ContentType();
+      return originalJsonp(body);
+    };
+  }
+
+  next();
+});
+
 app.use("/uploads", express.static(UPLOADS_DIR));
 ensureUploadDir("products");
 app.use(attachAuthUser);
@@ -198,12 +230,19 @@ const ensureSeededUserRoles = async () => {
 const startServer = async () => {
   await ensureSeededUserRoles();
   await seedArtistAccessRequestsIfEmpty();
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  return server;
 };
 
-startServer().catch((err) => {
-  console.error("Failed to start server", err);
-  process.exit(1);
-});
+// Start the server only if this file is run directly
+if (require.main === module) {
+  startServer().catch((err) => {
+    console.error("Failed to start server", err);
+    process.exit(1);
+  });
+}
+
+// Export the app for testing
+module.exports = app;

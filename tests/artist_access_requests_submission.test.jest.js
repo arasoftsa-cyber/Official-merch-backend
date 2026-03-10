@@ -1,18 +1,17 @@
-const assert = require("node:assert/strict");
 const path = require("node:path");
-const { describe, test, afterEach } = require("node:test");
+const { silenceTestLogs } = require("./helpers/logging");
 
 const DB_MODULE_PATH = path.resolve(__dirname, "../src/core/db/db.js");
 const SERVICE_MODULE_PATH = path.resolve(
   __dirname,
-  "../src/modules/artistAccessRequests/artistAccessRequests.service.js"
+  "../src/services/artistAccessRequests.service.js"
 );
 
 const ORIGINAL_PREMIUM_PLAN_ENABLED = process.env.PREMIUM_PLAN_ENABLED;
+let restoreLogs = () => {};
 
 const clearModules = () => {
-  delete require.cache[DB_MODULE_PATH];
-  delete require.cache[SERVICE_MODULE_PATH];
+  jest.resetModules();
 };
 
 const createFakeDb = () => {
@@ -50,7 +49,7 @@ const createFakeDb = () => {
       update: async () => 1,
       insert(payload) {
         state.touchedTables.push(tableName);
-        if (tableName === "artist_access_requests") {
+        if (String(tableName || "").includes("artist_access_requests")) {
           state.insertedRequests.push(payload);
         }
         return {
@@ -108,54 +107,59 @@ afterEach(() => {
   clearModules();
 });
 
-describe("artist access request plan submission validation", { concurrency: false }, () => {
-  test("missing requested_plan_type returns 400 validation", async () => {
+beforeAll(() => {
+  restoreLogs = silenceTestLogs(["log", "warn"]);
+});
+
+afterAll(() => {
+  restoreLogs();
+});
+
+describe("artist access request submission", () => {
+  it("missing requested_plan_type returns 400 validation", async () => {
     const { db, state } = createFakeDb();
     const { submitArtistAccessRequest } = loadServiceWithDb(db);
 
-    await assert.rejects(
-      () => submitArtistAccessRequest({ rawBody: buildValidRawBody() }),
-      (error) => {
-        assert.equal(error?.code, "validation");
-        assert.ok(
-          Array.isArray(error?.details) &&
-            error.details.some((row) => row.field === "requested_plan_type")
-        );
-        return true;
-      }
-    );
+    try {
+      await submitArtistAccessRequest({ rawBody: buildValidRawBody() });
+      throw new Error("expected validation rejection");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "validation" });
+      expect(error).toMatchObject({
+        details: expect.arrayContaining([
+          expect.objectContaining({ field: "requested_plan_type" }),
+        ]),
+      });
+    }
 
-    assert.equal(state.insertedRequests.length, 0);
+    expect(state.insertedRequests.length).toBe(0);
   });
 
-  test("premium plan returns 400 when premium is disabled", async () => {
+  it("premium plan returns 400 when premium is disabled", async () => {
     process.env.PREMIUM_PLAN_ENABLED = "false";
     const { db, state } = createFakeDb();
     const { submitArtistAccessRequest } = loadServiceWithDb(db);
 
-    await assert.rejects(
-      () =>
-        submitArtistAccessRequest({
-          rawBody: buildValidRawBody({ requested_plan_type: "premium" }),
-        }),
-      (error) => {
-        assert.equal(error?.code, "validation");
-        assert.ok(
-          Array.isArray(error?.details) &&
-            error.details.some(
-              (row) =>
-                row.field === "requested_plan_type" &&
-                /not enabled/i.test(String(row.message || ""))
-            )
-        );
-        return true;
-      }
-    );
+    try {
+      await submitArtistAccessRequest({
+        rawBody: buildValidRawBody({ requested_plan_type: "premium" }),
+      });
+      throw new Error("expected validation rejection");
+    } catch (error) {
+      expect(Array.isArray(error?.details)).toBe(true);
+      expect(
+        error.details.some(
+          (row) =>
+            row.field === "requested_plan_type" &&
+            /not enabled/i.test(String(row.message || ""))
+        )
+      ).toBe(true);
+    }
 
-    assert.equal(state.insertedRequests.length, 0);
+    expect(state.insertedRequests.length).toBe(0);
   });
 
-  test("basic and advanced plans are saved as requested_plan_type", async () => {
+  it("basic and advanced plans are saved as requested_plan_type", async () => {
     process.env.PREMIUM_PLAN_ENABLED = "false";
     for (const sample of [
       { field: "requested_plan_type", value: "basic", expected: "basic" },
@@ -166,11 +170,13 @@ describe("artist access request plan submission validation", { concurrency: fals
       const rawBody = buildValidRawBody({ [sample.field]: sample.value });
       const result = await submitArtistAccessRequest({ rawBody });
 
-      assert.ok(result?.request_id);
-      assert.equal(state.insertedRequests.length, 1);
-      assert.equal(state.insertedRequests[0].requested_plan_type, sample.expected);
-      assert.equal(state.insertedRequests[0].status, "pending");
-      assert.equal(state.touchedTables.includes("artist_subscriptions"), false);
+      expect(result?.request_id).toBeTruthy();
+      expect(state.insertedRequests.length).toBe(1);
+      expect(state.insertedRequests[0].requested_plan_type).toBe(sample.expected);
+      expect(state.insertedRequests[0].status).toBe("pending");
+      expect(state.touchedTables.includes("leads")).toBe(false);
+      expect(state.touchedTables.includes("artist_subscriptions")).toBe(false);
     }
   });
 });
+

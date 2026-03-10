@@ -16,29 +16,28 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
-Write-Host "Running backend smoke tests..."
-cmd /c "set CI_SMOKE=1&& set SMOKE_SEED_ENABLED=1&& node -r dotenv/config tests/smoke_phase1_3.js"
+Write-Host "Running backend Jest test suite..."
+npm.cmd run test:backend:ci
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "Backend smoke tests failed."
+  Write-Error "Backend Jest test suite failed."
   exit 1
 }
 
 $frontendDir = Resolve-Path "$backendDir\..\Official-merch-frontend"
 Set-Location $frontendDir
-Write-Host "Looking for UI smoke script..."
+Write-Host "Resolving frontend Playwright script..."
 $packageJson = Get-Content package.json -Raw | ConvertFrom-Json
-$candidateScripts = @('ui:smoke', 'ui:test', 'test:ui', 'test:playwright', 'playwright:test', 'ui:playwright')
-$scriptToRun = $candidateScripts | Where-Object { $packageJson.scripts.$_ } | Select-Object -First 1
+$scriptToRun = 'ui:test'
 
-if (-not $scriptToRun) {
-  Write-Host "UI smoke script not configured; skipped."
-  exit 0
+if (-not $packageJson.scripts.$scriptToRun) {
+  Write-Error "Required frontend script '$scriptToRun' is not configured in Official-merch-frontend/package.json."
+  exit 1
 }
 
-Write-Host "Running UI smoke script '$scriptToRun'..."
-npm run $scriptToRun
+Write-Host "Running frontend Playwright suite: npm.cmd run $scriptToRun"
+npm.cmd run $scriptToRun
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "UI smoke script '$scriptToRun' failed."
+  Write-Error "Frontend Playwright suite '$scriptToRun' failed."
   exit 1
 }
 

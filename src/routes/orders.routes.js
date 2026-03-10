@@ -307,7 +307,7 @@ const formatEvent = (row) => {
   };
 };
 
-const BUYER_ROLES = new Set(["buyer"]);
+const BUYER_ROLES = new Set(["buyer", "fan", "artist", "label", "admin"]);
 const getRole = (user) => (user ? (user.role || user.userRole || "").toString().toLowerCase() : "");
 const isBuyer = (user) => BUYER_ROLES.has(getRole(user));
 

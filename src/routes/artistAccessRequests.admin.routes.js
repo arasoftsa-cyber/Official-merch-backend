@@ -20,6 +20,57 @@ const isUuid = (value) =>
   );
 
 const trim = (value) => (typeof value === "string" ? value.trim() : "");
+const validationError = (message) => {
+  const error = new Error(message || "validation_error");
+  error.status = 400;
+  error.code = "validation_error";
+  return error;
+};
+
+const validateApprovalPayload = (raw = {}) => {
+  const body = raw && typeof raw === "object" ? raw : {};
+  const finalPlanType = normalizePlan(
+    body.final_plan_type || body.finalPlanType || body.approved_plan_type
+  );
+  if (!PLAN_TYPE_VALUES.includes(finalPlanType)) {
+    throw validationError(
+      `final_plan_type must be one of: ${PLAN_TYPE_VALUES.join(", ")}`
+    );
+  }
+  if (
+    finalPlanType === PLAN_TYPES.PREMIUM &&
+    normalizePlan(process.env.PREMIUM_PLAN_ENABLED) !== "true"
+  ) {
+    throw validationError(`final_plan_type "${PLAN_TYPES.PREMIUM}" is not enabled`);
+  }
+
+  const password = trim(body.password || body.temp_password || body.generated_password);
+  if (!password) {
+    throw validationError("password is required for approval");
+  }
+
+  if (finalPlanType === PLAN_TYPES.BASIC) {
+    return {
+      final_plan_type: PLAN_TYPES.BASIC,
+      payment_mode: "NA",
+      transaction_id: "NA",
+      password,
+    };
+  }
+
+  const paymentMode = trim(body.payment_mode || body.paymentMode).toLowerCase();
+  const transactionId = trim(body.transaction_id || body.transactionId);
+  if (!paymentMode || !transactionId) {
+    throw validationError("payment_mode and transaction_id are required");
+  }
+
+  return {
+    final_plan_type: finalPlanType,
+    payment_mode: paymentMode,
+    transaction_id: transactionId,
+    password,
+  };
+};
 const pad2 = (value) => String(value).padStart(2, "0");
 const toLocalDateString = (value) =>
   `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
