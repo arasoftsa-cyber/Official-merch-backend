@@ -7,6 +7,7 @@ const request = require("supertest");
 const { getDb } = require("../src/core/db/db");
 const { verifyPassword, hashPassword } = require("../src/utils/password");
 const { createUser } = require("../src/services/user.service");
+const { sendEmailByTemplate } = require("../src/services/email.service");
 const { createAuthenticatedAgent } = require("./helpers/auth");
 const {
   buildAdminFixture,
@@ -22,6 +23,7 @@ const { unwrapArrayBody } = require("./helpers/response");
 jest.mock("../src/core/db/db.js");
 jest.mock("../src/utils/password.js");
 jest.mock("../src/services/user.service");
+jest.mock("../src/services/email.service.js");
 
 const app = require("../app");
 
@@ -53,6 +55,7 @@ describe("auth login and RBAC", () => {
     ({ mockQueryBuilder } = setupMockDb(getDb));
     verifyPassword.mockResolvedValue(true);
     hashPassword.mockResolvedValue("hashed-password");
+    sendEmailByTemplate.mockResolvedValue({ delivered: true, skipped: false });
     createUser.mockResolvedValue({
       id: requesterUser.id,
       email: requesterUser.email,
@@ -241,5 +244,11 @@ describe("auth login and RBAC", () => {
     expect(registerRes.body.refreshToken).toBeTruthy();
     expect(registerRes.body.user?.email).toBe(email);
     expect(registerRes.body.user?.role).toBe("buyer");
+    expect(sendEmailByTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateKey: "welcome-account",
+        to: email,
+      })
+    );
   });
 });

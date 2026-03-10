@@ -11,6 +11,8 @@ const {
   fanLogin,
   partnerLogin,
   register,
+  passwordForgot,
+  passwordReset,
   oidcGoogleStart,
   oidcGoogleCallback,
   oidcGoogleExchange,
@@ -45,6 +47,8 @@ router.post(
   partnerLogin
 );
 router.post("/register", express.json(), register);
+router.post("/password/forgot", express.json(), loginRateLimiter, passwordForgot);
+router.post("/password/reset", express.json(), loginRateLimiter, passwordReset);
 router.get("/oidc/google/start", oidcGoogleStart);
 router.get("/oidc/google/callback", oidcGoogleCallback);
 router.post("/oidc/google/exchange", express.json(), oidcGoogleExchange);

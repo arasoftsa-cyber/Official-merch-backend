@@ -7,6 +7,8 @@ const { ok, fail } = require("../core/http/errorResponse");
 const rateLimit = require("../core/http/rateLimit");
 const { orderSpamGuard } = require("../core/http/spamDetection");
 const { startPaymentForOrder } = require("../core/payments/paymentService");
+const { sendEmailByTemplate } = require("../services/email.service");
+const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
 const {
   isNonNegativeInteger,
   resolveOurShareCents,
@@ -307,6 +309,102 @@ const formatEvent = (row) => {
   };
 };
 
+const ORDER_DEFAULT_VIEW_PATH = "/fan/orders";
+const ORDER_STATUS_MESSAGES = Object.freeze({
+  cancelled: "Your order has been cancelled.",
+});
+
+const resolveOrderEmailRecipient = async ({ db, user }) => {
+  const directEmail = String(user?.email || "").trim().toLowerCase();
+  if (directEmail) return directEmail;
+
+  const userId = String(user?.id || "").trim();
+  if (!userId) return "";
+
+  const row = await db("users").where({ id: userId }).first("email");
+  return String(row?.email || "").trim().toLowerCase();
+};
+
+const sendOrderConfirmationEmailBestEffort = async ({ db, user, order, items }) => {
+  try {
+    const recipientEmail = await resolveOrderEmailRecipient({ db, user });
+    if (!recipientEmail || !order?.id) return;
+
+    const orderUrl =
+      buildPublicAppUrl({ path: `${ORDER_DEFAULT_VIEW_PATH}/${order.id}` }) ||
+      buildPublicAppUrl({ path: ORDER_DEFAULT_VIEW_PATH });
+
+    const result = await sendEmailByTemplate({
+      templateKey: "order-confirmation",
+      to: recipientEmail,
+      payload: {
+        orderId: order.id,
+        totalCents: order.total_cents,
+        currency: "INR",
+        itemCount: Array.isArray(items) ? items.length : null,
+        orderUrl,
+      },
+      metadata: {
+        flow: "order_confirmation",
+        orderId: order.id,
+      },
+    });
+
+    if (result.errorCode && !result.skipped) {
+      console.warn("[orders.email] order confirmation failed", {
+        orderId: order.id,
+        code: result.errorCode,
+      });
+    }
+  } catch (err) {
+    console.warn(
+      "[orders.email] order confirmation failed",
+      err?.code || err?.message || err
+    );
+  }
+};
+
+const sendOrderStatusUpdateEmailBestEffort = async ({ db, user, orderId, status }) => {
+  try {
+    const safeOrderId = String(orderId || "").trim();
+    const safeStatus = String(status || "").trim().toLowerCase();
+    if (!safeOrderId || !safeStatus) return;
+
+    const recipientEmail = await resolveOrderEmailRecipient({ db, user });
+    if (!recipientEmail) return;
+
+    const orderUrl =
+      buildPublicAppUrl({ path: `${ORDER_DEFAULT_VIEW_PATH}/${safeOrderId}` }) ||
+      buildPublicAppUrl({ path: ORDER_DEFAULT_VIEW_PATH });
+
+    const result = await sendEmailByTemplate({
+      templateKey: "order-status-update",
+      to: recipientEmail,
+      payload: {
+        orderId: safeOrderId,
+        status: safeStatus,
+        orderUrl,
+        message: ORDER_STATUS_MESSAGES[safeStatus] || "",
+      },
+      metadata: {
+        flow: "order_status_update",
+        orderId: safeOrderId,
+        status: safeStatus,
+      },
+    });
+
+    if (result.errorCode && !result.skipped) {
+      console.warn("[orders.email] status update failed", {
+        orderId: safeOrderId,
+        status: safeStatus,
+        code: result.errorCode,
+      });
+    }
+  } catch (err) {
+    console.warn("[orders.email] status update failed", err?.code || err?.message || err);
+  }
+};
+
 const BUYER_ROLES = new Set(["buyer", "fan", "artist", "label", "admin"]);
 const getRole = (user) => (user ? (user.role || user.userRole || "").toString().toLowerCase() : "");
 const isBuyer = (user) => BUYER_ROLES.has(getRole(user));
@@ -554,6 +652,12 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
       createdAt: canceled.order.created_at,
       items: canceled.items.map(formatItem),
     });
+    void sendOrderStatusUpdateEmailBestEffort({
+      db,
+      user: req.user,
+      orderId,
+      status: "cancelled",
+    });
   } catch (err) {
     next(err);
   }
@@ -686,6 +790,12 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
         ok(res, {
           order: formatOrder(order),
           items: items.map(formatItem),
+        });
+        void sendOrderConfirmationEmailBestEffort({
+          db,
+          user: req.user,
+          order,
+          items,
         });
       } catch (err) {
         if (err?.code === "PRODUCT_NOT_FOUND") {

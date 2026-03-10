@@ -1,6 +1,7 @@
 const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
+const env = require("./src/core/config/env");
 const { getDb } = require("./src/core/db/db");
 const { UPLOADS_DIR } = require("./src/core/config/paths");
 const { ensureUploadDir } = require("./src/core/config/uploadPaths");
@@ -8,6 +9,7 @@ const { logRequest } = require("./src/core/http/logger");
 const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
+const { getEmailConfigReadiness } = require("./src/services/email.service");
 const router = require("./src/routes/index");
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -235,6 +237,25 @@ const ensureSeededUserRoles = async () => {
 };
 
 const startServer = async () => {
+  const emailReadiness = getEmailConfigReadiness();
+  const envDiagnostics =
+    typeof env.getEnvDiagnostics === "function"
+      ? env.getEnvDiagnostics()
+      : { loadedFiles: [] };
+  console.log("[startup] email config readiness", {
+    configured: emailReadiness.configured,
+    apiKeyPresent: emailReadiness.apiKeyPresent,
+    fromEmailPresent: emailReadiness.fromEmailPresent,
+    fromNamePresent: emailReadiness.fromNamePresent,
+    envFiles: envDiagnostics.loadedFiles,
+  });
+  if (!emailReadiness.configured) {
+    console.warn("[startup] transactional email disabled (missing env)", {
+      missingRequired: emailReadiness.missingRequired,
+      missingOptional: emailReadiness.missingOptional,
+    });
+  }
+
   await ensureSeededUserRoles();
   await seedArtistAccessRequestsIfEmpty();
   const server = app.listen(PORT, () => {

@@ -10,6 +10,7 @@ const ROUTE_MODULE_PATH = path.resolve(
   "../src/routes/artistAccessRequests.admin.routes.js"
 );
 const AUTH_ROUTE_MODULE_PATH = path.resolve(__dirname, "../src/routes/auth.routes.js");
+const EMAIL_SERVICE_MODULE_PATH = path.resolve(__dirname, "../src/services/email.service.js");
 
 const REQUEST_ID = "11111111-1111-1111-1111-111111111111";
 const ADMIN_ID = "22222222-2222-2222-2222-222222222222";
@@ -367,10 +368,21 @@ const loadRouterWithDb = (db) => {
   return require(ROUTE_MODULE_PATH);
 };
 
-const createApiAppWithDb = (db) => {
+const createApiAppWithDb = (db, { sendEmailByTemplate } = {}) => {
   clearModules();
+  const emailMock =
+    sendEmailByTemplate ||
+    jest.fn().mockResolvedValue({
+      attempted: true,
+      delivered: true,
+      queued: true,
+      skipped: false,
+    });
   jest.doMock(DB_MODULE_PATH, () => ({
     getDb: () => db,
+  }));
+  jest.doMock(EMAIL_SERVICE_MODULE_PATH, () => ({
+    sendEmailByTemplate: emailMock,
   }));
   jest.doMock("../src/core/http/auth.middleware", () => ({
     requireAuth: (req, res, next) => {
@@ -393,6 +405,7 @@ const createApiAppWithDb = (db) => {
   app.use(express.json());
   app.use("/api/admin/artist-access-requests", adminRequestsRouter);
   app.use("/api/auth", authRouter);
+  app.__sendEmailByTemplate = emailMock;
   return app;
 };
 
@@ -471,7 +484,13 @@ describe("artist access request admin review", () => {
   it("approved requestor can log in via partner portal", async () => {
     const approvalPassword = "ApproveLogin123!";
     const { db, state } = createFakeDb({ requestedPlanType: "basic" });
-    const app = createApiAppWithDb(db);
+    const sendEmailByTemplate = jest.fn().mockResolvedValue({
+      attempted: true,
+      delivered: true,
+      queued: true,
+      skipped: false,
+    });
+    const app = createApiAppWithDb(db, { sendEmailByTemplate });
 
     const approveResponse = await request(app)
       .post(`/api/admin/artist-access-requests/${REQUEST_ID}/approve`)
@@ -487,6 +506,13 @@ describe("artist access request admin review", () => {
     expect(approveResponse.body?.status).toBe("approved");
     expect(state.request.status).toBe("approved");
     expect(state.artistUserMap.length).toBe(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sendEmailByTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateKey: "admin-approved-account",
+        to: "approve-test@example.com",
+      })
+    );
 
     const partnerLoginResponse = await request(app).post("/api/auth/partner/login").send({
       email: state.request.email,
@@ -651,6 +677,60 @@ describe("artist access request admin review", () => {
     expect(res.body).toEqual({ status: "rejected" });
     expect(state.request.status).toBe("rejected");
     expect(state.request.rejection_comment).toBe("Smoke reject validation");
+  });
+
+  it("reject API sends admin-rejected-account email through shared sender", async () => {
+    const { db } = createFakeDb({ requestedPlanType: "basic" });
+    const sendEmailByTemplate = jest.fn().mockResolvedValue({
+      attempted: true,
+      delivered: true,
+      queued: true,
+      skipped: false,
+    });
+    const app = createApiAppWithDb(db, { sendEmailByTemplate });
+
+    const rejectResponse = await request(app)
+      .post(`/api/admin/artist-access-requests/${REQUEST_ID}/reject`)
+      .set("x-test-user-id", ADMIN_ID)
+      .set("x-test-role", "admin")
+      .send({ comment: "Not enough portfolio depth yet" });
+
+    expect(rejectResponse.status).toBe(200);
+    expect(rejectResponse.body?.status).toBe("rejected");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sendEmailByTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateKey: "admin-rejected-account",
+        to: "approve-test@example.com",
+      })
+    );
+  });
+
+  it("approval and rejection still succeed when email sender fails", async () => {
+    const failingSend = jest.fn().mockRejectedValue(new Error("email_down"));
+    const approveDb = createFakeDb({ requestedPlanType: "basic" }).db;
+    const approveApp = createApiAppWithDb(approveDb, { sendEmailByTemplate: failingSend });
+
+    const approveResponse = await request(approveApp)
+      .post(`/api/admin/artist-access-requests/${REQUEST_ID}/approve`)
+      .set("x-test-user-id", ADMIN_ID)
+      .set("x-test-role", "admin")
+      .send({
+        final_plan_type: "advanced",
+        payment_mode: "cash",
+        transaction_id: "TX-EMAIL-FAIL",
+        password: "AdminSet123!",
+      });
+    expect(approveResponse.status).toBe(200);
+
+    const rejectDb = createFakeDb({ requestedPlanType: "basic" }).db;
+    const rejectApp = createApiAppWithDb(rejectDb, { sendEmailByTemplate: failingSend });
+    const rejectResponse = await request(rejectApp)
+      .post(`/api/admin/artist-access-requests/${REQUEST_ID}/reject`)
+      .set("x-test-user-id", ADMIN_ID)
+      .set("x-test-role", "admin")
+      .send({ comment: "Missing required details" });
+    expect(rejectResponse.status).toBe(200);
   });
 });
 
