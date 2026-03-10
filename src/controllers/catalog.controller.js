@@ -14,6 +14,7 @@ const {
   replaceProductListingPhotos,
   loadProductListingPhotos,
   loadProductDesignImage,
+  loadProductDesignImagesMap,
   attachListingPhotosToProducts,
 } = require("../services/catalog.service");
 const {
@@ -24,6 +25,7 @@ const {
 const { resolveOurShareCents } = require("../utils/economics");
 
 const { getDb } = require("../core/db/db");
+const { getTableColumns } = require("../core/db/schemaCache");
 
 const BAD_REQUEST = { error: "bad_request" };
 const NOT_FOUND = { error: "product_not_found" };
@@ -296,7 +298,7 @@ const listArtistProducts = async (req, res) => {
     return res.json({ items: [] });
   }
 
-  const productColumns = await db("products").columnInfo();
+  const productColumns = await getTableColumns(db, "products");
   const selections = [
     "id",
     "title",
@@ -324,18 +326,17 @@ const listArtistProducts = async (req, res) => {
     .where({ artist_id: mapping.artist_id })
     .orderBy("created_at", "desc");
   const rows = await artistProductsQuery;
-  const items = await Promise.all(
-    rows.map(async (row) => {
-      const designImageUrl = await loadProductDesignImage(row.id);
-      return withStatus({
-        ...row,
-        designImageUrl,
-        design_image_url: designImageUrl,
-        skuTypes: Array.isArray(row.skuTypes) ? row.skuTypes : [],
-        sku_types: Array.isArray(row.skuTypes) ? row.skuTypes : [],
-      });
-    })
-  );
+  const designImageMap = await loadProductDesignImagesMap(rows.map((row) => row.id));
+  const items = rows.map((row) => {
+    const designImageUrl = designImageMap.get(row.id) || "";
+    return withStatus({
+      ...row,
+      designImageUrl,
+      design_image_url: designImageUrl,
+      skuTypes: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+      sku_types: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+    });
+  });
 
   return res.json({ items });
 };
@@ -571,7 +572,7 @@ const listAdminOnboardingRequests = async (req, res) => {
   const statusFilter = requestedStatus || PRODUCT_STATUS_PENDING;
 
   const db = getDb();
-  const productColumns = await db("products").columnInfo();
+  const productColumns = await getTableColumns(db, "products");
   const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
   const hasRejectionReason = Object.prototype.hasOwnProperty.call(
     productColumns,
@@ -606,25 +607,25 @@ const listAdminOnboardingRequests = async (req, res) => {
     .where("p.status", statusFilter)
     .orderBy("p.created_at", "asc");
 
-  const items = await Promise.all(
-    rows.map(async (row) => {
-      const [listingPhotoUrls, designImageUrl] = await Promise.all([
-        loadProductListingPhotos(row.id),
-        loadProductDesignImage(row.id),
-      ]);
-      return withStatus({
-        ...row,
-        artistName: row.artistName || "",
-        artistHandle: row.artistHandle || "",
-        listing_photos: listingPhotoUrls,
-        listingPhotoUrls,
-        designImageUrl,
-        design_image_url: designImageUrl,
-        skuTypes: Array.isArray(row.skuTypes) ? row.skuTypes : [],
-        sku_types: Array.isArray(row.skuTypes) ? row.skuTypes : [],
-      });
-    })
-  );
+  const itemsWithListingPhotos = await attachListingPhotosToProducts(rows);
+  const designImageMap = await loadProductDesignImagesMap(rows.map((row) => row.id));
+  const items = itemsWithListingPhotos.map((row) => {
+    const listingPhotoUrls = Array.isArray(row.listingPhotoUrls)
+      ? row.listingPhotoUrls
+      : [];
+    const designImageUrl = designImageMap.get(row.id) || "";
+    return withStatus({
+      ...row,
+      artistName: row.artistName || "",
+      artistHandle: row.artistHandle || "",
+      listing_photos: listingPhotoUrls,
+      listingPhotoUrls,
+      designImageUrl,
+      design_image_url: designImageUrl,
+      skuTypes: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+      sku_types: Array.isArray(row.skuTypes) ? row.skuTypes : [],
+    });
+  });
 
   return res.json({ items });
 };

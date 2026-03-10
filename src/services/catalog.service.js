@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
+const { getTableColumns, hasTableCached } = require("../core/db/schemaCache");
 const { getUploadDir, ensureUploadDir } = require("../core/config/uploadPaths");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 const {
@@ -414,7 +415,7 @@ const normalizeSkuTypes = (rawValue) => {
 
 const getActiveProducts = async () => {
   const db = getDb();
-  const productColumns = await db("products").columnInfo();
+  const productColumns = await getTableColumns(db, "products");
   const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
   const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
   const query = db("products")
@@ -442,7 +443,7 @@ const getActiveProducts = async () => {
 
 const getAdminProducts = async () => {
   const db = getDb();
-  const columns = await db("products").columnInfo();
+  const columns = await getTableColumns(db, "products");
   const selections = [
     "id",
     "title",
@@ -512,7 +513,7 @@ const getAdminProducts = async () => {
 
 const getProductsByArtistId = async (artistId) => {
   const db = getDb();
-  const columns = await db("products").columnInfo();
+  const columns = await getTableColumns(db, "products");
   const selections = [
     "id",
     "title",
@@ -763,76 +764,73 @@ const loadProductListingPhotos = async (productId) => {
   return loadProductMediaByRole({ productId, role: "listing_photo" });
 };
 
-const loadProductMediaByRole = async ({ productId, role }) => {
-  if (!productId) return [];
+const loadProductMediaByRoleMap = async ({ productIds = [], role }) => {
+  const normalizedProductIds = Array.from(new Set((productIds || []).filter(Boolean)));
+  const byProductId = new Map();
+  for (const productId of normalizedProductIds) {
+    byProductId.set(productId, []);
+  }
+
+  if (!role || normalizedProductIds.length === 0) return byProductId;
+
   const db = getDb();
-  const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
-  const hasMediaAssets = await db.schema.hasTable("media_assets");
-  if (!hasEntityMediaLinks || !hasMediaAssets) return [];
+  const [hasEntityMediaLinks, hasMediaAssets] = await Promise.all([
+    hasTableCached(db, "entity_media_links"),
+    hasTableCached(db, "media_assets"),
+  ]);
+  if (!hasEntityMediaLinks || !hasMediaAssets) return byProductId;
 
   const rows = await db("entity_media_links as eml")
     .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
     .where("eml.entity_type", "product")
-    .andWhere("eml.entity_id", productId)
+    .whereIn("eml.entity_id", normalizedProductIds)
     .andWhere("eml.role", role)
+    .orderBy("eml.entity_id", "asc")
     .orderBy("eml.sort_order", "asc")
-    .select("ma.public_url");
+    .select("eml.entity_id", "ma.public_url");
 
-  return rows
-    .map((row) => toAbsolutePublicUrl(row.public_url))
-    .filter(Boolean);
+  for (const row of rows) {
+    const key = row.entity_id;
+    if (!byProductId.has(key)) byProductId.set(key, []);
+    const normalizedUrl = toAbsolutePublicUrl(row.public_url);
+    if (normalizedUrl) byProductId.get(key).push(normalizedUrl);
+  }
+
+  return byProductId;
+};
+
+const loadProductMediaByRole = async ({ productId, role }) => {
+  if (!productId) return [];
+  const map = await loadProductMediaByRoleMap({ productIds: [productId], role });
+  return map.get(productId) || [];
+};
+
+const loadProductDesignImagesMap = async (productIds = []) => {
+  const grouped = await loadProductMediaByRoleMap({
+    productIds,
+    role: "design_image",
+  });
+  const byProductId = new Map();
+  for (const [productId, urls] of grouped.entries()) {
+    byProductId.set(productId, Array.isArray(urls) ? urls[0] || "" : "");
+  }
+  return byProductId;
 };
 
 const loadProductDesignImage = async (productId) => {
-  const urls = await loadProductMediaByRole({ productId, role: "design_image" });
-  return urls[0] || "";
+  if (!productId) return "";
+  const designImageMap = await loadProductDesignImagesMap([productId]);
+  return designImageMap.get(productId) || "";
 };
 
 const attachListingPhotosToProducts = async (products = []) => {
   if (!Array.isArray(products) || products.length === 0) return products;
 
-  const db = getDb();
-  const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
-  const hasMediaAssets = await db.schema.hasTable("media_assets");
-  if (!hasEntityMediaLinks || !hasMediaAssets) {
-    return products.map((product) => ({
-      ...product,
-      listingPhotoUrls: [],
-      listing_photos: [],
-      photos: [],
-      primaryPhotoUrl: "",
-      cover_photo_url: null,
-    }));
-  }
-
   const productIds = products.map((p) => p.id).filter(Boolean);
-  if (!productIds.length) {
-    return products.map((product) => ({
-      ...product,
-      listingPhotoUrls: [],
-      listing_photos: [],
-      photos: [],
-      primaryPhotoUrl: "",
-      cover_photo_url: null,
-    }));
-  }
-
-  const rows = await db("entity_media_links as eml")
-    .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
-    .where("eml.entity_type", "product")
-    .whereIn("eml.entity_id", productIds)
-    .andWhere("eml.role", "listing_photo")
-    .orderBy("eml.entity_id", "asc")
-    .orderBy("eml.sort_order", "asc")
-    .select("eml.entity_id", "ma.public_url");
-
-  const byProductId = new Map();
-  for (const row of rows) {
-    const key = row.entity_id;
-    if (!byProductId.has(key)) byProductId.set(key, []);
-    const url = toAbsolutePublicUrl(row.public_url);
-    if (url) byProductId.get(key).push(url);
-  }
+  const byProductId = await loadProductMediaByRoleMap({
+    productIds,
+    role: "listing_photo",
+  });
 
   return products.map((product) => ({
     ...product,
@@ -1080,6 +1078,7 @@ module.exports = {
   loadProductListingPhotos,
   saveProductDesignImage,
   loadProductDesignImage,
+  loadProductDesignImagesMap,
   attachListingPhotosToProducts,
   createProductWithVariants,
 };

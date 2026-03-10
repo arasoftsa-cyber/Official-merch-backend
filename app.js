@@ -9,7 +9,6 @@ const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
 const router = require("./src/routes/index");
-const cookieParser = require("cookie-parser");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
@@ -20,7 +19,6 @@ const logStartupDebug = (...args) => {
     console.log(...args);
   }
 };
-app.use(cookieParser());
 // 1. Define your allowed domains
 const allowedOrigins = [
     'http://localhost:5173',

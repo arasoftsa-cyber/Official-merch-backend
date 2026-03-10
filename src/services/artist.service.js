@@ -1,4 +1,5 @@
 const { getDb } = require("../core/db/db");
+const { getTableColumns } = require("../core/db/schemaCache");
 
 const isUuid = (value) => {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -6,17 +7,11 @@ const isUuid = (value) => {
 
 const findByHandle = async (handle) => {
   const db = getDb();
-  const [
-    hasProfilePhotoUrl,
-    hasStatus,
-    hasStory,
-    hasBio,
-  ] = await Promise.all([
-    db.schema.hasColumn("artists", "profile_photo_url"),
-    db.schema.hasColumn("artists", "status"),
-    db.schema.hasColumn("artists", "story"),
-    db.schema.hasColumn("artists", "bio"),
-  ]);
+  const columns = await getTableColumns(db, "artists");
+  const hasProfilePhotoUrl = Object.prototype.hasOwnProperty.call(columns, "profile_photo_url");
+  const hasStatus = Object.prototype.hasOwnProperty.call(columns, "status");
+  const hasStory = Object.prototype.hasOwnProperty.call(columns, "story");
+  const hasBio = Object.prototype.hasOwnProperty.call(columns, "bio");
 
   const selectColumns = ["id", "handle", "name", "theme_json"];
   if (hasProfilePhotoUrl) selectColumns.push("profile_photo_url");
@@ -35,8 +30,9 @@ const findByHandle = async (handle) => {
 
 const listArtists = async ({ featured = false } = {}) => {
   const db = getDb();
-  const hasProfilePhotoUrl = await db.schema.hasColumn("artists", "profile_photo_url");
-  const hasStatus = await db.schema.hasColumn("artists", "status");
+  const columns = await getTableColumns(db, "artists");
+  const hasProfilePhotoUrl = Object.prototype.hasOwnProperty.call(columns, "profile_photo_url");
+  const hasStatus = Object.prototype.hasOwnProperty.call(columns, "status");
 
   const selectColumns = ["id", "handle", "name", "theme_json", "created_at"];
   if (hasProfilePhotoUrl) selectColumns.push("profile_photo_url");
@@ -45,7 +41,7 @@ const listArtists = async ({ featured = false } = {}) => {
   let query = db("artists").select(selectColumns).orderBy("created_at", "desc");
 
   if (featured) {
-    const hasFeatured = await db.schema.hasColumn("artists", "is_featured");
+    const hasFeatured = Object.prototype.hasOwnProperty.call(columns, "is_featured");
     if (!hasFeatured) {
       return [];
     }
@@ -57,12 +53,13 @@ const listArtists = async ({ featured = false } = {}) => {
 
 const listFeaturedArtists = async () => {
   const db = getDb();
-  const hasFeatured = await db.schema.hasColumn("artists", "is_featured");
+  const columns = await getTableColumns(db, "artists");
+  const hasFeatured = Object.prototype.hasOwnProperty.call(columns, "is_featured");
   if (!hasFeatured) {
     return [];
   }
-  const hasProfilePhotoUrl = await db.schema.hasColumn("artists", "profile_photo_url");
-  const hasStatus = await db.schema.hasColumn("artists", "status");
+  const hasProfilePhotoUrl = Object.prototype.hasOwnProperty.call(columns, "profile_photo_url");
+  const hasStatus = Object.prototype.hasOwnProperty.call(columns, "status");
   const selectColumns = ["id", "handle", "name", "theme_json", "created_at"];
   if (hasProfilePhotoUrl) selectColumns.push("profile_photo_url");
   if (hasStatus) selectColumns.push("status");
