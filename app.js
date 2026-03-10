@@ -19,11 +19,18 @@ const logStartupDebug = (...args) => {
     console.log(...args);
   }
 };
+const splitCsv = (value) =>
+  String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
 // 1. Define your allowed domains
-const allowedOrigins = [
-    'http://localhost:5173',
-    process.env.CLIENT_URL,
-];
+const configuredCorsOrigins = splitCsv(process.env.CORS_ORIGINS);
+const devCorsOrigins = ["http://localhost:5173", "http://localhost:5174"];
+const allowedOrigins = isProduction
+  ? [...new Set(configuredCorsOrigins)]
+  : [...new Set([...devCorsOrigins, ...configuredCorsOrigins])];
 
 // 2. Configure CORS options
 const corsOptions = {

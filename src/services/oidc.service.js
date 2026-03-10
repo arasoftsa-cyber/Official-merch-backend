@@ -12,9 +12,21 @@ const ALLOWED_PORTALS = new Set(["fan", "partner"]);
 const STATE_TTL_SECONDS = 10 * 60;
 const EXCHANGE_CODE_TTL_MS = 60 * 1000;
 const OIDC_CALLBACK_PATH = "/api/auth/oidc/google/callback";
+const DEFAULT_DEV_FRONTEND_ORIGIN = "http://localhost:5173";
+const DEFAULT_APP_CALLBACK_PATH = "/auth/oidc/callback";
+const FRONTEND_ORIGIN_ENV_KEYS = [
+  "OIDC_APP_BASE_URL",
+  "APP_PUBLIC_URL",
+  "UI_BASE_URL",
+  "FRONTEND_URL",
+  "CLIENT_URL",
+  "PUBLIC_URL",
+  "APP_URL",
+];
 
 let oidcClientPromise = null;
 let oidcConfigCache = null;
+let frontendOidcConfigCache = null;
 const exchangeCodeStore = new Map();
 
 const isOidcEnabled = () => {
@@ -36,6 +48,9 @@ const asOidcMisconfigured = (message) => {
   err.code = "OIDC_MISCONFIGURED";
   return err;
 };
+
+const isProductionEnv = () =>
+  String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
 
 const parseDiscoveryUrl = (rawValue) => {
   const value = String(rawValue || "").trim();
@@ -123,19 +138,140 @@ const splitConfiguredOrigins = (value) =>
     .map((entry) => entry.trim())
     .filter(Boolean);
 
+const dedupe = (values) => [...new Set((values || []).filter(Boolean))];
+
+const normalizeOriginFromUrl = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    if (!/^https?:$/i.test(parsed.protocol)) return "";
+    return parsed.origin;
+  } catch (_err) {
+    return "";
+  }
+};
+
+const normalizeConfiguredOrigin = (rawValue, label) => {
+  const value = String(rawValue || "").trim();
+  if (!value) return "";
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_err) {
+    throw asOidcMisconfigured(`${label} must be a valid absolute http(s) URL`);
+  }
+
+  if (!/^https?:$/i.test(parsed.protocol)) {
+    throw asOidcMisconfigured(`${label} must use http or https`);
+  }
+
+  if (parsed.search || parsed.hash || parsed.username || parsed.password) {
+    throw asOidcMisconfigured(`${label} must be an origin URL without query/hash/credentials`);
+  }
+
+  const pathname = parsed.pathname || "/";
+  if (pathname !== "/" && pathname !== "") {
+    throw asOidcMisconfigured(
+      `${label} must not include a path; use origin only (for example https://officialmerch.tech)`
+    );
+  }
+
+  return parsed.origin;
+};
+
+const normalizeAppCallbackPath = (rawValue, label) => {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return DEFAULT_APP_CALLBACK_PATH;
+  if (/^https?:\/\//i.test(raw)) {
+    throw asOidcMisconfigured(`${label} must be a relative path`);
+  }
+  if (!raw.startsWith("/") || raw.startsWith("//")) {
+    throw asOidcMisconfigured(`${label} must start with a single "/"`);
+  }
+  if (raw.includes("?") || raw.includes("#")) {
+    throw asOidcMisconfigured(`${label} must not include query string or hash`);
+  }
+
+  if (raw.length === 1) return raw;
+  return raw.replace(/\/+$/, "");
+};
+
+const getConfiguredFrontendOrigins = () => {
+  const explicit = [];
+  for (const envKey of FRONTEND_ORIGIN_ENV_KEYS) {
+    const raw = String(process.env[envKey] || "").trim();
+    if (!raw) continue;
+    explicit.push(normalizeConfiguredOrigin(raw, envKey));
+  }
+
+  const corsConfigured = splitConfiguredOrigins(process.env.CORS_ORIGINS).map((value, index) =>
+    normalizeConfiguredOrigin(value, `CORS_ORIGINS[${index}]`)
+  );
+
+  return {
+    explicit: dedupe(explicit),
+    corsConfigured: dedupe(corsConfigured),
+  };
+};
+
+const getFrontendOidcConfig = () => {
+  if (frontendOidcConfigCache) return frontendOidcConfigCache;
+
+  const { explicit, corsConfigured } = getConfiguredFrontendOrigins();
+  const prod = isProductionEnv();
+  const primaryExplicitOrigin = explicit[0] || "";
+
+  if (prod && !primaryExplicitOrigin) {
+    throw asOidcMisconfigured(
+      "OIDC_APP_BASE_URL (or APP_PUBLIC_URL/UI_BASE_URL/FRONTEND_URL/CLIENT_URL) is required in production"
+    );
+  }
+
+  const fallbackOrigin = prod ? "" : DEFAULT_DEV_FRONTEND_ORIGIN;
+  const primaryOrigin = primaryExplicitOrigin || fallbackOrigin;
+  if (!primaryOrigin) {
+    throw asOidcMisconfigured("Unable to resolve frontend public origin for OIDC");
+  }
+
+  if (
+    prod &&
+    (primaryOrigin.toLowerCase().includes("localhost") ||
+      primaryOrigin.includes("127.0.0.1"))
+  ) {
+    throw asOidcMisconfigured("Frontend public origin must not use localhost in production");
+  }
+
+  const allowedOrigins = dedupe([
+    primaryOrigin,
+    ...explicit,
+    ...corsConfigured,
+    ...(prod ? [] : [DEFAULT_DEV_FRONTEND_ORIGIN]),
+  ]);
+
+  frontendOidcConfigCache = {
+    primaryOrigin,
+    allowedOrigins,
+    appCallbackPath: normalizeAppCallbackPath(
+      process.env.OIDC_APP_CALLBACK_PATH || process.env.OIDC_FRONTEND_CALLBACK_PATH,
+      "OIDC_APP_CALLBACK_PATH"
+    ),
+  };
+
+  return frontendOidcConfigCache;
+};
+
 const getAllowedFrontendOrigins = () => {
-  const fromEnv = [
-    process.env.OIDC_APP_BASE_URL,
-    ...splitConfiguredOrigins(process.env.CORS_ORIGINS),
-  ].filter(Boolean);
-  const merged = [...new Set(["http://localhost:5173", ...fromEnv])];
-  return merged;
+  return getFrontendOidcConfig().allowedOrigins;
 };
 
 const isAllowedFrontendOrigin = (value) => {
-  if (!value) return false;
+  const normalized = normalizeOriginFromUrl(value);
+  if (!normalized) return false;
   const allowed = getAllowedFrontendOrigins();
-  return allowed.includes(value);
+  return allowed.includes(normalized);
 };
 
 const normalizePortal = (value, fallback = "fan") => {
@@ -160,23 +296,48 @@ const toSafeReturnTo = (value, portal) => {
   return fallback;
 };
 
-const resolveAppOrigin = (req) => {
-  const allowed = getAllowedFrontendOrigins();
-  const originHeader = String(req?.headers?.origin || "").trim();
-  if (isAllowedFrontendOrigin(originHeader)) return originHeader;
+const firstForwardedValue = (value) => String(value || "").split(",")[0].trim();
 
-  const referer = String(req?.headers?.referer || "").trim();
-  if (referer) {
-    try {
-      const parsed = new URL(referer);
-      const origin = parsed.origin;
-      if (isAllowedFrontendOrigin(origin)) return origin;
-    } catch (_err) {
-      // ignored
-    }
+const inferOriginFromRequest = (req) => {
+  const originHeader = normalizeOriginFromUrl(req?.headers?.origin);
+  if (originHeader) return originHeader;
+
+  const refererOrigin = normalizeOriginFromUrl(req?.headers?.referer);
+  if (refererOrigin) return refererOrigin;
+
+  const forwardedHost = firstForwardedValue(req?.headers?.["x-forwarded-host"]);
+  const forwardedProto = firstForwardedValue(req?.headers?.["x-forwarded-proto"]);
+  if (forwardedHost && forwardedProto) {
+    const forwardedOrigin = normalizeOriginFromUrl(`${forwardedProto}://${forwardedHost}`);
+    if (forwardedOrigin) return forwardedOrigin;
   }
 
-  return allowed[0] || "http://localhost:5173";
+  const host = firstForwardedValue(req?.headers?.host);
+  const protocolHint = forwardedProto || String(req?.protocol || "").trim();
+  if (host && protocolHint) {
+    const hostOrigin = normalizeOriginFromUrl(`${protocolHint}://${host}`);
+    if (hostOrigin) return hostOrigin;
+  }
+
+  return "";
+};
+
+const resolveAppOrigin = (req, requestedAppOrigin) => {
+  const frontendConfig = getFrontendOidcConfig();
+  const prod = isProductionEnv();
+  const requested = normalizeOriginFromUrl(requestedAppOrigin);
+  if (requested && isAllowedFrontendOrigin(requested)) return requested;
+
+  if (prod) {
+    return frontendConfig.primaryOrigin;
+  }
+
+  const inferred = inferOriginFromRequest(req);
+  if (inferred && isAllowedFrontendOrigin(inferred)) {
+    return inferred;
+  }
+
+  return frontendConfig.primaryOrigin;
 };
 
 const getOidcClient = async () => {
@@ -196,16 +357,20 @@ const getOidcClient = async () => {
 };
 
 const buildSignedState = ({ portal, returnTo, appOrigin, nonce }) => {
+  const frontendConfig = getFrontendOidcConfig();
   const payload = {
     portal: normalizePortal(portal),
     returnTo: toSafeReturnTo(returnTo, portal),
-    appOrigin: isAllowedFrontendOrigin(appOrigin) ? appOrigin : getAllowedFrontendOrigins()[0],
+    appOrigin: isAllowedFrontendOrigin(appOrigin)
+      ? normalizeOriginFromUrl(appOrigin)
+      : frontendConfig.primaryOrigin,
     nonce: String(nonce || ""),
   };
   return jwt.sign(payload, getStateSecret(), { expiresIn: STATE_TTL_SECONDS });
 };
 
 const parseSignedState = (stateToken) => {
+  const frontendConfig = getFrontendOidcConfig();
   const verified = jwt.verify(String(stateToken || ""), getStateSecret());
   const portal = normalizePortal(verified?.portal);
   return {
@@ -213,20 +378,21 @@ const parseSignedState = (stateToken) => {
     nonce: String(verified?.nonce || ""),
     returnTo: toSafeReturnTo(verified?.returnTo, portal),
     appOrigin: isAllowedFrontendOrigin(verified?.appOrigin)
-      ? verified.appOrigin
-      : getAllowedFrontendOrigins()[0],
+      ? normalizeOriginFromUrl(verified?.appOrigin)
+      : frontendConfig.primaryOrigin,
   };
 };
 
-const buildGoogleAuthorizationUrl = async ({ req, portal, returnTo }) => {
+const buildGoogleAuthorizationUrl = async ({ req, portal, returnTo, appOrigin }) => {
   const config = getOidcConfig();
   const client = await getOidcClient();
   const resolvedPortal = normalizePortal(portal);
   const nonce = generators.nonce();
+  const resolvedAppOrigin = resolveAppOrigin(req, appOrigin);
   const state = buildSignedState({
     portal: resolvedPortal,
     returnTo,
-    appOrigin: resolveAppOrigin(req),
+    appOrigin: resolvedAppOrigin,
     nonce,
   });
   const authorizationUrl = client.authorizationUrl({
@@ -240,6 +406,7 @@ const buildGoogleAuthorizationUrl = async ({ req, portal, returnTo }) => {
 
 const consumeGoogleCallback = async (req) => {
   const config = getOidcConfig();
+  const frontendConfig = getFrontendOidcConfig();
   const client = await getOidcClient();
   const params = client.callbackParams(req);
   const parsedState = parseSignedState(params?.state);
@@ -258,6 +425,7 @@ const consumeGoogleCallback = async (req) => {
     portal: parsedState.portal,
     returnTo: parsedState.returnTo,
     appOrigin: parsedState.appOrigin,
+    appCallbackPath: frontendConfig.appCallbackPath,
     email: String(claims?.email || userinfo?.email || "")
       .trim()
       .toLowerCase(),
@@ -312,6 +480,7 @@ module.exports = {
   consumeExchangeCode,
   isOidcEnabled,
   getOidcConfig,
+  getFrontendOidcConfig,
   OIDC_CALLBACK_PATH,
   parseSignedState,
   toSafeReturnTo,
