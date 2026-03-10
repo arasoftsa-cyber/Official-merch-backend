@@ -13,6 +13,7 @@ const oidcService = require("../services/oidc.service");
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
 const FAN_ALLOWED_ROLES = new Set(["buyer", "fan"]);
 const authDebugEnabled = process.env.AUTH_DEBUG === "1";
+const DEFAULT_OIDC_APP_CALLBACK_PATH = "/auth/oidc/callback";
 
 const logPartnerLogin = (...args) => {
   if (!authDebugEnabled) return;
@@ -86,13 +87,37 @@ const buildAuthResponse = async (user) => {
 
 const getPortalLoginPath = (portal) => (portal === "partner" ? "/partner/login" : "/fan/login");
 
+const getOidcFrontendDefaults = () => {
+  const fallback = {
+    appOrigin: "",
+    appCallbackPath: DEFAULT_OIDC_APP_CALLBACK_PATH,
+  };
+  if (typeof oidcService.getFrontendOidcConfig !== "function") {
+    return fallback;
+  }
+  try {
+    const config = oidcService.getFrontendOidcConfig();
+    return {
+      appOrigin: String(config?.primaryOrigin || "").trim(),
+      appCallbackPath: String(config?.appCallbackPath || DEFAULT_OIDC_APP_CALLBACK_PATH).trim(),
+    };
+  } catch (_err) {
+    return fallback;
+  }
+};
+
 const appendQuery = (baseUrl, query) => {
-  const url = new URL(baseUrl);
+  const rawBase = String(baseUrl || "").trim();
+  const isAbsolute = /^https?:\/\//i.test(rawBase);
+  const safeBase = rawBase || "/";
+  const url = isAbsolute
+    ? new URL(safeBase)
+    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, "http://localhost");
   for (const [key, value] of Object.entries(query || {})) {
     if (value === undefined || value === null || value === "") continue;
     url.searchParams.set(key, String(value));
   }
-  return url.toString();
+  return isAbsolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
 };
 
 const redirectToFrontendLogin = (res, { appOrigin, portal, returnTo, portalError, message }) => {
@@ -105,8 +130,9 @@ const redirectToFrontendLogin = (res, { appOrigin, portal, returnTo, portalError
   return res.redirect(302, redirectUrl);
 };
 
-const redirectToFrontendCallback = (res, { appOrigin, portal, returnTo, exchangeCode }) => {
-  const callbackUrl = appendQuery(`${appOrigin}/auth/oidc/callback`, {
+const redirectToFrontendCallback = (res, { appOrigin, appCallbackPath, portal, returnTo, exchangeCode }) => {
+  const callbackPath = String(appCallbackPath || DEFAULT_OIDC_APP_CALLBACK_PATH).trim();
+  const callbackUrl = appendQuery(`${appOrigin}${callbackPath}`, {
     portal,
     returnTo,
     code: exchangeCode,
@@ -334,10 +360,12 @@ const oidcGoogleStart = async (req, res) => {
       return fail(res, 400, "validation_error", "portal must be fan or partner");
     }
     const returnTo = oidcService.toSafeReturnTo(req.query?.returnTo || "", portal);
+    const appOrigin = String(req.query?.appOrigin || "").trim();
     const { authorizationUrl } = await oidcService.buildGoogleAuthorizationUrl({
       req,
       portal,
       returnTo,
+      appOrigin,
     });
     return res.redirect(302, authorizationUrl);
   } catch (err) {
@@ -353,6 +381,7 @@ const oidcGoogleStart = async (req, res) => {
 };
 
 const oidcGoogleCallback = async (req, res) => {
+  const oidcDefaults = getOidcFrontendDefaults();
   let callbackContext = {
     portal: "fan",
     returnTo: "/fan",
@@ -365,6 +394,7 @@ const oidcGoogleCallback = async (req, res) => {
       portal: callbackData.portal,
       returnTo: callbackData.returnTo,
       appOrigin: callbackData.appOrigin,
+      appCallbackPath: callbackData.appCallbackPath,
     };
 
     if (!callbackData.email || !callbackData.sub) {
