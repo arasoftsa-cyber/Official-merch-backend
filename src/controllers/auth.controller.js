@@ -385,7 +385,7 @@ const oidcGoogleCallback = async (req, res) => {
   let callbackContext = {
     portal: "fan",
     returnTo: "/fan",
-    appOrigin: "http://officialmerch.tech",
+    appOrigin: "http://localhost:5173",
   };
 
   try {
