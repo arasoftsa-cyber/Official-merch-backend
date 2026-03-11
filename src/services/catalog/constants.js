@@ -1,3 +1,6 @@
+const { getUploadDir } = require("../../core/config/uploadPaths");
+
+const PRODUCT_UPLOAD_DIR = getUploadDir("products");
 const ALLOWED_PRODUCT_COLORS = new Set([
   "black",
   "white",
@@ -56,6 +59,7 @@ const ALLOWED_DESIGN_IMAGE_MIME_TYPES = new Set([
 const ALLOWED_DESIGN_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".svg"];
 
 module.exports = {
+  PRODUCT_UPLOAD_DIR,
   ALLOWED_PRODUCT_COLORS,
   LISTING_PHOTO_FIELD_NAMES,
   LISTING_PHOTO_COLLECTION_FIELDS,
@@ -65,3 +69,4 @@ module.exports = {
   ALLOWED_DESIGN_IMAGE_MIME_TYPES,
   ALLOWED_DESIGN_IMAGE_EXTENSIONS,
 };
+
