@@ -5,7 +5,11 @@
   "main": "index.js",
   "scripts": {
     "test": "jest",
-    "test:backend:ci": "node -e \"const { spawnSync } = require('child_process'); const workers = process.env.JEST_MAX_WORKERS || '50%'; const result = spawnSync('npx', ['jest', `--maxWorkers=${workers}`], { stdio: 'inherit', shell: true }); process.exit(result.status ?? 1);\"",
+    "test:backend:local": "node -e \"const { spawnSync } = require('child_process'); const workers = process.env.JEST_MAX_WORKERS || '50%'; const result = spawnSync('npx', ['jest', `--maxWorkers=${workers}`], { stdio: 'inherit', shell: true }); process.exit(result.status ?? 1);\"",
+    "test:backend:prod-config": "npx jest --runInBand tests/oidc_frontend_origin_config.test.jest.js tests/oidc_config.test.jest.js tests/oidc_start_redirect_uri.test.jest.js",
+    "test:backend:ci": "npm run test:backend:local",
+    "ci:local": "powershell -ExecutionPolicy Bypass -File .\\scripts\\ci_backend_local.ps1",
+    "ci:prod-config": "powershell -ExecutionPolicy Bypass -File .\\scripts\\ci_prod_config_check.ps1",
     "migrate:latest": "knex migrate:latest",
     "start": "nodemon app.js",
     "migrate:rollback": "knex migrate:rollback",

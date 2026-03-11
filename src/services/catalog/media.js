@@ -6,6 +6,11 @@ const { hasTableCached } = require("../../core/db/schemaCache");
 const { ensureUploadDir } = require("../../core/config/uploadPaths");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 const { PRODUCT_UPLOAD_DIR } = require("./constants");
+const { getStorageProvider } = require("../../storage");
+const { finalizeUploadedMedia } = require("../../storage/mediaUploadLifecycle");
+const { createMediaAsset } = require("../mediaAssets.service");
+const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
+const storageProvider = getStorageProvider();
 
 const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
   return saveProductMediaFiles({ trx, productId, files, role: "listing_photo" });
@@ -29,6 +34,19 @@ const saveProductMediaFiles = async ({ trx, productId, files = [], role = "listi
       id: mediaAssetId,
       public_url: publicUrl,
       created_at: trx.fn.now(),
+    const relativePath = path.posix.join("products", filename);
+    const saved = await storageProvider.saveFile({
+      relativePath,
+      buffer: file.buffer,
+    });
+    const storageResult = await finalizeUploadedMedia({ saved, file, relativePath });
+    const publicUrl = storageResult.publicUrl;
+    const mediaAssetId = randomUUID();
+    await createMediaAsset({
+      trx,
+      id: mediaAssetId,
+      publicUrl,
+      storageMetadata: storageResult,
     });
 
     await trx("entity_media_links").insert({

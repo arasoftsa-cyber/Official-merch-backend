@@ -1,8 +1,9 @@
-const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
-const { UPLOADS_DIR } = require("../core/config/paths");
+const { getStorageProvider } = require("../storage");
+const { finalizeUploadedMedia } = require("../storage/mediaUploadLifecycle");
+const { createMediaAsset } = require("./mediaAssets.service");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 const { PLAN_TYPES, assertPlanAllowed } = require("../common/constants");
 
@@ -11,7 +12,7 @@ const HANDLE_RE = /^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/;
 const HTTP_URL_RE = /^https?:\/\//i;
 const PROFILE_PHOTO_FIELDS = new Set(["profile_photo", "profilePhoto"]);
 const MAX_UPLOAD_BYTES = 1024 * 1024;
-const UPLOAD_DIR = path.join(UPLOADS_DIR, "artist-access-requests");
+const storageProvider = getStorageProvider();
 
 const LIMITS = {
   artistName: 120,
@@ -221,13 +222,16 @@ const saveUploadedFile = async (file) => {
   if (!file || !PROFILE_PHOTO_FIELDS.has(file.fieldname) || !file.buffer?.length) return null;
   if (file.buffer.length > MAX_UPLOAD_BYTES) return null;
 
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   const originalExt = path.extname(file.originalname || "").slice(0, 12);
   const ext = /^[.][a-z0-9]+$/i.test(originalExt) ? originalExt : "";
   const filename = `${Date.now()}-${randomUUID()}${ext}`;
-  const absolutePath = path.join(UPLOAD_DIR, filename);
-  await fs.promises.writeFile(absolutePath, file.buffer);
-  return `/uploads/artist-access-requests/${filename}`;
+  const relativePath = path.posix.join("artist-access-requests", filename);
+  const saved = await storageProvider.saveFile({
+    relativePath,
+    buffer: file.buffer,
+  });
+  const storageResult = await finalizeUploadedMedia({ saved, file, relativePath });
+  return storageResult.publicUrl;
 };
 
 const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
@@ -326,10 +330,10 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
         if (publicPath) {
           const publicUrl = toAbsolutePublicUrl(publicPath);
           const mediaAssetId = randomUUID();
-          await trx("media_assets").insert({
+          await createMediaAsset({
+            trx,
             id: mediaAssetId,
-            public_url: publicUrl,
-            created_at: trx.fn.now(),
+            publicUrl,
           });
           await trx("entity_media_links").insert({
             id: randomUUID(),

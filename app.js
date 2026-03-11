@@ -21,12 +21,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
 const isProduction = process.env.NODE_ENV === "production";
+const STORAGE_PROVIDER_LOCAL = "local";
+const STORAGE_PROVIDER_OBJECT = "object";
 const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
 const logStartupDebug = (...args) => {
   if (DEBUG_STARTUP) {
     console.log(...args);
   }
 };
+const isTruthyEnv = (value) => /^(1|true|yes|on)$/i.test(String(value || "").trim());
+const normalizeStorageProvider = (value) =>
+  String(value || STORAGE_PROVIDER_LOCAL).trim().toLowerCase();
+const configuredStorageProvider = normalizeStorageProvider(process.env.STORAGE_PROVIDER);
+const enableLegacyUploadsStatic = isTruthyEnv(process.env.ENABLE_LEGACY_UPLOADS_STATIC);
+const shouldServeUploadsFromApp =
+  configuredStorageProvider !== STORAGE_PROVIDER_OBJECT || enableLegacyUploadsStatic;
 const corsOptions = {
   origin: frontendOrigin,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -100,8 +109,15 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use("/uploads", express.static(UPLOADS_DIR));
-ensureUploadDir("products");
+if (shouldServeUploadsFromApp) {
+  app.use("/uploads", express.static(UPLOADS_DIR));
+  // Local/default mode serves uploads from app runtime storage.
+  ensureUploadDir();
+} else {
+  console.log(
+    `[startup] /uploads static serving disabled (STORAGE_PROVIDER=${configuredStorageProvider})`
+  );
+}
 app.use(attachAuthUser);
 app.use(requestId);
 app.use(logRequest);

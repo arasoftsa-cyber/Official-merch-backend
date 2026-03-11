@@ -1,6 +1,7 @@
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
+const { createMediaAsset } = require("./mediaAssets.service");
 const {
   HOMEPAGE_ENTITY_TYPE,
   HOMEPAGE_ENTITY_ID,
@@ -42,10 +43,10 @@ const createHomepageBanner = async ({ publicUrl, sortOrder }) => {
     const mediaAssetId = randomUUID();
     const linkId = randomUUID();
 
-    await trx("media_assets").insert({
+    await createMediaAsset({
+      trx,
       id: mediaAssetId,
-      public_url: normalizedPublicUrl,
-      created_at: trx.fn.now(),
+      publicUrl: normalizedPublicUrl,
     });
 
     await trx("entity_media_links").insert({
@@ -79,16 +80,14 @@ const createHomepageBannerFromStoredPublicUrl = async ({ publicUrl, sortOrder })
   const db = getDb();
   return db.transaction(async (trx) => {
     const linkId = randomUUID();
-    const [mediaAssetRow] = await trx("media_assets")
-      .insert({
-        public_url: publicUrl,
-        created_at: trx.fn.now(),
-      })
-      .returning(["id"]);
+    const mediaAsset = await createMediaAsset({
+      trx,
+      publicUrl,
+    });
 
     await trx("entity_media_links").insert({
       id: linkId,
-      media_asset_id: mediaAssetRow.id,
+      media_asset_id: mediaAsset.id,
       entity_type: HOMEPAGE_ENTITY_TYPE,
       entity_id: HOMEPAGE_ENTITY_ID,
       role: ROLE_HERO_CAROUSEL,
