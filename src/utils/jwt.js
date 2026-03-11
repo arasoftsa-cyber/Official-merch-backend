@@ -12,6 +12,11 @@ const getRefreshSecret = () => {
   const refreshSecret = process.env.JWT_REFRESH_SECRET;
   if (refreshSecret) return refreshSecret;
 
+  const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  if (nodeEnv !== "test") {
+    throw new Error("JWT_REFRESH_SECRET is required");
+  }
+
   const fallback = process.env.JWT_SECRET;
   if (!fallback) throw new Error("JWT_REFRESH_SECRET is required");
 

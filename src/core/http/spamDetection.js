@@ -8,6 +8,7 @@ const isEnabledFlag = (value) => {
 };
 const shouldBypassSpamGuard = (req) => {
   const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
+  const isTestOrDev = nodeEnv === "test" || nodeEnv === "development";
   const smokeSeedEnabled =
     isEnabledFlag(process.env.SMOKE_SEED_ENABLED) ||
     isEnabledFlag(process.env.SMOKE_SEED) ||
@@ -18,7 +19,7 @@ const shouldBypassSpamGuard = (req) => {
     isEnabledFlag(process.env.DISABLE_RATE_LIMIT) ||
     smokeSeedEnabled ||
     nodeEnv === "test" ||
-    smokeHeader
+    (smokeHeader && isTestOrDev)
   );
 };
 

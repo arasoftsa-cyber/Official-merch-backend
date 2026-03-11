@@ -2,6 +2,7 @@
 
 const { createHash, randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
+const { hasTableCached } = require("../core/db/schemaCache");
 const { signAccessToken, signRefreshToken, verifyRefreshToken } = require("../utils/jwt");
 
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -111,9 +112,26 @@ const revokeRefreshToken = async ({ refreshToken }) => {
   return Number(updated) > 0;
 };
 
+const revokeAllRefreshTokensForUser = async ({ userId, trx } = {}) => {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) return 0;
+
+  const db = trx || getDb();
+  const hasRefreshTable = await hasTableCached(db, "auth_refresh_tokens").catch(() => false);
+  if (!hasRefreshTable) return 0;
+
+  const updated = await db("auth_refresh_tokens")
+    .where({ user_id: normalizedUserId })
+    .whereNull("revoked_at")
+    .update({ revoked_at: db.fn.now() });
+
+  return Number(updated) || 0;
+};
+
 module.exports = {
   INVALID_REFRESH_TOKEN_CODE,
   issueAuthTokensForUser,
   rotateRefreshToken,
   revokeRefreshToken,
+  revokeAllRefreshTokensForUser,
 };

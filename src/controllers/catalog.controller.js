@@ -26,6 +26,28 @@ const { resolveOurShareCents } = require("../utils/economics");
 
 const { getDb } = require("../core/db/db");
 const { getTableColumns } = require("../core/db/schemaCache");
+const { parseMultipartFormData } = require("./catalog/multipart");
+const {
+  PRODUCT_STATUS_PENDING,
+  PRODUCT_STATUS_INACTIVE,
+  PRODUCT_STATUS_ACTIVE,
+  PRODUCT_STATUS_REJECTED,
+  normalizeProductStatusValue,
+  statusFromIsActive,
+  normalizeProductStatusFromRecord,
+  canArtistToggleProductStatus,
+  canAdminPatchProductStatus,
+  withStatus,
+} = require("./catalog/status");
+const {
+  sanitizeSkuSegment,
+  buildDefaultSku,
+  buildDefaultVariantSku,
+  normalizeProductPrice,
+  parseNonNegativeInt,
+  asUuidOrNull,
+} = require("./catalog/normalizers");
+const { getRole, isAdmin, isArtist } = require("./catalog/auth");
 
 const BAD_REQUEST = { error: "bad_request" };
 const NOT_FOUND = { error: "product_not_found" };
@@ -33,250 +55,6 @@ const DEFAULT_VARIANT_SKU = "DEFAULT";
 const DEFAULT_VARIANT_STOCK = 0;
 const DEFAULT_VARIANT_SIZE = "M";
 const DEFAULT_VARIANT_COLOR = "default";
-const MAX_MULTIPART_BYTES = 15 * 1024 * 1024;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PRODUCT_STATUS_PENDING = "pending";
-const PRODUCT_STATUS_INACTIVE = "inactive";
-const PRODUCT_STATUS_ACTIVE = "active";
-const PRODUCT_STATUS_REJECTED = "rejected";
-const PRODUCT_STATUS_VALUES = new Set([
-  PRODUCT_STATUS_PENDING,
-  PRODUCT_STATUS_INACTIVE,
-  PRODUCT_STATUS_ACTIVE,
-  PRODUCT_STATUS_REJECTED,
-]);
-
-const parseContentDisposition = (line) => {
-  const nameMatch = line.match(/name="([^"]+)"/i);
-  const filenameMatch = line.match(/filename="([^"]*)"/i);
-  return {
-    name: nameMatch?.[1] || "",
-    filename: filenameMatch?.[1] || "",
-  };
-};
-
-const splitBufferBy = (buffer, delimiter) => {
-  const chunks = [];
-  let start = 0;
-  while (start <= buffer.length) {
-    const idx = buffer.indexOf(delimiter, start);
-    if (idx === -1) {
-      chunks.push(buffer.subarray(start));
-      break;
-    }
-    chunks.push(buffer.subarray(start, idx));
-    start = idx + delimiter.length;
-  }
-  return chunks;
-};
-
-const parseMultipartFormData = async (req) => {
-  const contentType = String(req.headers["content-type"] || "");
-  if (!contentType.toLowerCase().includes("multipart/form-data")) return null;
-
-  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
-  if (!boundary) return { fields: {}, filesByField: {}, parseError: "missing_boundary" };
-
-  const body = await new Promise((resolve, reject) => {
-    const chunks = [];
-    let total = 0;
-    req.on("data", (chunk) => {
-      total += chunk.length;
-      if (total > MAX_MULTIPART_BYTES) {
-        reject(new Error("payload_too_large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  }).catch((error) => ({ parseError: error.message }));
-
-  if (body?.parseError) return { fields: {}, filesByField: {}, parseError: body.parseError };
-
-  const delimiter = Buffer.from(`--${boundary}`);
-  const rawParts = splitBufferBy(body, delimiter);
-  const fields = {};
-  const filesByField = {};
-
-  for (const rawPart of rawParts) {
-    if (!rawPart || rawPart.length === 0) continue;
-
-    let part = rawPart;
-    if (part.subarray(0, 2).toString() === "\r\n") part = part.subarray(2);
-    if (part.length === 0) continue;
-    if (part.subarray(0, 2).toString() === "--") continue;
-
-    const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
-    if (headerEnd < 0) continue;
-
-    const headerText = part.subarray(0, headerEnd).toString("utf8");
-    let content = part.subarray(headerEnd + 4);
-    if (content.subarray(content.length - 2).toString() === "\r\n") {
-      content = content.subarray(0, content.length - 2);
-    }
-
-    const dispositionLine = headerText
-      .split("\r\n")
-      .find((line) => /^content-disposition:/i.test(line));
-    if (!dispositionLine) continue;
-
-    const { name, filename } = parseContentDisposition(dispositionLine);
-    if (!name) continue;
-
-    const contentTypeLine = headerText
-      .split("\r\n")
-      .find((line) => /^content-type:/i.test(line));
-    const mimeType = contentTypeLine
-      ? contentTypeLine.split(":")[1]?.trim() || "application/octet-stream"
-      : "application/octet-stream";
-
-    if (filename) {
-      const filePayload = {
-        fieldname: name,
-        originalname: filename,
-        mimetype: mimeType,
-        buffer: content,
-      };
-      const existing = filesByField[name];
-      if (!existing) {
-        filesByField[name] = filePayload;
-      } else if (Array.isArray(existing)) {
-        existing.push(filePayload);
-      } else {
-        filesByField[name] = [existing, filePayload];
-      }
-      continue;
-    }
-
-    fields[name] = content.toString("utf8");
-  }
-
-  return { fields, filesByField };
-};
-
-const sanitizeSkuSegment = (value) => {
-  if (typeof value !== "string" || value.trim() === "") {
-    return "";
-  }
-  return value
-    .trim()
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toUpperCase();
-};
-
-const buildDefaultSku = (productId, sizeSegment, colorSegment) => {
-  const cleanSize = sanitizeSkuSegment(sizeSegment) || "SIZE";
-  const cleanColor = sanitizeSkuSegment(colorSegment) || "COLOR";
-  const prefix = productId ? productId.slice(0, 8) : "XXXX";
-  return `SKU-${prefix}-${cleanSize}-${cleanColor}`;
-};
-
-const buildDefaultVariantSku = (productId) => {
-  const cleanProductId = String(productId || "").trim();
-  return `SKU-${cleanProductId || "PRODUCT"}-DEFAULT`;
-};
-
-const normalizeProductPrice = ({ price, priceCents, requirePrice = true } = {}) => {
-  if (priceCents !== undefined && priceCents !== null) {
-    const candidate = Number(priceCents);
-    if (!Number.isFinite(candidate) || !Number.isInteger(candidate) || candidate <= 0) {
-      return { error: "invalid_price" };
-    }
-    return { priceCents: candidate };
-  }
-
-  if (price !== undefined && price !== null) {
-    if (typeof price === "number") {
-      if (!Number.isFinite(price) || price <= 0) {
-        return { error: "invalid_price" };
-      }
-      return { priceCents: Math.round(price * 100) };
-    }
-
-    if (typeof price === "string") {
-      const trimmed = price.trim();
-      if (trimmed === "") {
-        return { error: "invalid_price" };
-      }
-      const candidate = Number(trimmed);
-      if (!Number.isFinite(candidate) || candidate <= 0) {
-        return { error: "invalid_price" };
-      }
-      return { priceCents: Math.round(candidate * 100) };
-    }
-
-    return { error: "invalid_price" };
-  }
-
-  if (requirePrice) {
-    return { error: "missing_price" };
-  }
-  return {};
-};
-
-const normalizeProductStatusValue = (rawValue) => {
-  if (typeof rawValue !== "string") return null;
-  const normalized = rawValue.trim().toLowerCase();
-  if (!PRODUCT_STATUS_VALUES.has(normalized)) return null;
-  return normalized;
-};
-
-const statusFromIsActive = (isActive) =>
-  isActive ? PRODUCT_STATUS_ACTIVE : PRODUCT_STATUS_INACTIVE;
-
-const normalizeProductStatusFromRecord = (product = {}) => {
-  const statusFromColumn = normalizeProductStatusValue(product?.status);
-  if (statusFromColumn) return statusFromColumn;
-  if (product?.is_active === false || product?.isActive === false) {
-    return PRODUCT_STATUS_INACTIVE;
-  }
-  return PRODUCT_STATUS_ACTIVE;
-};
-
-const canArtistToggleProductStatus = (existingStatus, requestedStatus = null) => {
-  const existingAllowed =
-    existingStatus === PRODUCT_STATUS_ACTIVE || existingStatus === PRODUCT_STATUS_INACTIVE;
-  if (!existingAllowed) return false;
-  if (!requestedStatus) return true;
-  return (
-    requestedStatus === PRODUCT_STATUS_ACTIVE ||
-    requestedStatus === PRODUCT_STATUS_INACTIVE
-  );
-};
-
-const canAdminPatchProductStatus = (existingStatus, requestedStatus = null) => {
-  const existingAllowed =
-    existingStatus === PRODUCT_STATUS_ACTIVE || existingStatus === PRODUCT_STATUS_INACTIVE;
-  if (!existingAllowed) return false;
-  if (!requestedStatus) return true;
-  return (
-    requestedStatus === PRODUCT_STATUS_ACTIVE ||
-    requestedStatus === PRODUCT_STATUS_INACTIVE
-  );
-};
-
-const withStatus = (product = {}) => ({
-  ...product,
-  status: normalizeProductStatusFromRecord(product),
-});
-
-const parseNonNegativeInt = (value) => {
-  if (value === undefined || value === null || value === "") return null;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) return null;
-  return parsed;
-};
-
-const asUuidOrNull = (value) => {
-  const normalized = String(value || "").trim();
-  if (!normalized) return null;
-  return UUID_RE.test(normalized) ? normalized : null;
-};
-
 const listProducts = async (req, res) => {
   const baseItems = isAdmin(req.user) ? await getAdminProducts() : await getActiveProducts();
   const items = (await attachListingPhotosToProducts(baseItems)).map(withStatus);
@@ -408,11 +186,6 @@ const getProduct = async (req, res) => {
     variants: responseVariants,
   });
 };
-
-const getRole = (user) => (user ? (user.role || user.userRole || "").toString().toLowerCase() : "");
-const ADMIN_ROLES = new Set(["admin"]);
-const isAdmin = (user) => ADMIN_ROLES.has(getRole(user));
-const isArtist = (user) => getRole(user) === "artist";
 
 const resolveArtistIdForUser = async (db, userId) => {
   if (!userId) return null;

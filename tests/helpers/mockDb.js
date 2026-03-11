@@ -18,6 +18,7 @@ const createMockQueryBuilder = () => ({
   limit: jest.fn().mockReturnThis(),
   first: jest.fn(),
   insert: jest.fn().mockReturnThis(),
+  update: jest.fn(),
   returning: jest.fn(),
   raw: jest.fn(),
   clone: jest.fn().mockReturnThis(),

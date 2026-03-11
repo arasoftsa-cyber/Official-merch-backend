@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "jest",
-    "test:backend:ci": "jest --maxWorkers=100%",
+    "test:backend:ci": "node -e \"const { spawnSync } = require('child_process'); const workers = process.env.JEST_MAX_WORKERS || '50%'; const result = spawnSync('npx', ['jest', `--maxWorkers=${workers}`], { stdio: 'inherit', shell: true }); process.exit(result.status ?? 1);\"",
     "migrate:latest": "knex migrate:latest",
     "start": "nodemon app.js",
     "migrate:rollback": "knex migrate:rollback",
@@ -15,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",

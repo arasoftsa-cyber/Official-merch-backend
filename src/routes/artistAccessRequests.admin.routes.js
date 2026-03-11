@@ -6,12 +6,16 @@ const { requirePolicy } = require("../core/http/policy.middleware");
 const { hashPassword } = require("../utils/password");
 const { copyRequestProfilePhotoToArtist } = require("../services/artistAccessRequests.service");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
+const { sendEmailByTemplate } = require("../services/email.service");
+const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
 // const { validateApprovalPayload } = require("../services/planValidation");
 const { PLAN_TYPES, PLAN_TYPE_VALUES, normalizePlan } = require("../common/constants");
 
 const ROUTER = express.Router();
 const STATUS_OPTIONS = new Set(["pending", "approved", "rejected"]);
 const LIST_STATUS_OPTIONS = new Set(["pending", "approved", "rejected", "denied"]);
+const PARTNER_LOGIN_PATH = "/partner/login";
+const APPLY_ARTIST_PATH = "/apply/artist";
 
 const isUuid = (value) =>
   typeof value === "string" &&
@@ -307,31 +311,66 @@ const createArtistFromRequest = async (trx, request, userId) => {
   return artistRow;
 };
 
-const sendEmailOrLog = async ({ to, subject, text }) => {
-  // No email provider wired yet in this repository. Log in development as fallback.
-  if (process.env.NODE_ENV !== "production") {
-    console.log("[artist-request-email:dev-stub]", { to, subject, text });
-    return;
-  }
-
-  // Production fallback: keep non-blocking and observable.
-  console.warn("[artist-request-email:missing-provider]", { to, subject });
-};
-
 const sendApprovalEmail = async ({ email, artistName }) => {
-  await sendEmailOrLog({
-    to: email,
-    subject: "Your artist onboarding request was approved",
-    text: `Hi ${artistName || "Artist"}, your request was approved. You can now log in to the partner portal with your artist credentials.`,
-  });
+  try {
+    const recipient = trim(email).toLowerCase();
+    if (!recipient) return;
+    const loginUrl =
+      buildPublicAppUrl({ path: PARTNER_LOGIN_PATH }) || buildPublicAppUrl({ path: "/" });
+
+    const result = await sendEmailByTemplate({
+      templateKey: "admin-approved-account",
+      to: recipient,
+      payload: {
+        accountName: artistName,
+        loginUrl,
+        appUrl: buildPublicAppUrl({ path: "/" }),
+      },
+      metadata: {
+        flow: "admin_account_approved",
+      },
+    });
+
+    if (result.errorCode && !result.skipped) {
+      console.warn("[artist-request-email] approval send failed", result.errorCode);
+    }
+  } catch (err) {
+    console.warn(
+      "[artist-request-email] approval send failed",
+      err?.code || err?.message || err
+    );
+  }
 };
 
 const sendRejectionEmail = async ({ email, artistName, comment }) => {
-  await sendEmailOrLog({
-    to: email,
-    subject: "Your artist onboarding request was rejected",
-    text: `Hi ${artistName || "Artist"}, your request was rejected. Comment: ${comment}`,
-  });
+  try {
+    const recipient = trim(email).toLowerCase();
+    if (!recipient) return;
+    const appUrl =
+      buildPublicAppUrl({ path: APPLY_ARTIST_PATH }) || buildPublicAppUrl({ path: "/" });
+
+    const result = await sendEmailByTemplate({
+      templateKey: "admin-rejected-account",
+      to: recipient,
+      payload: {
+        accountName: artistName,
+        reason: comment,
+        appUrl,
+      },
+      metadata: {
+        flow: "admin_account_rejected",
+      },
+    });
+
+    if (result.errorCode && !result.skipped) {
+      console.warn("[artist-request-email] rejection send failed", result.errorCode);
+    }
+  } catch (err) {
+    console.warn(
+      "[artist-request-email] rejection send failed",
+      err?.code || err?.message || err
+    );
+  }
 };
 
 const normalizeRequestedPlanType = (request) => {
@@ -673,7 +712,7 @@ ROUTER.post("/:id/approve", requireAuth, policy, async (req, res) => {
     }
     const result = approval.result;
 
-    await sendApprovalEmail({
+    void sendApprovalEmail({
       email: result.email,
       artistName: result.artistName,
     });
@@ -729,7 +768,7 @@ ROUTER.post("/:id/reject", requireAuth, policy, express.json(), async (req, res)
     }
 
     if (result.email) {
-      await sendRejectionEmail({
+      void sendRejectionEmail({
         email: result.email,
         artistName: result.artistName,
         comment,

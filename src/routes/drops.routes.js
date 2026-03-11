@@ -15,6 +15,11 @@ const {
   applySellableVariantExists,
 } = require("../services/variantAvailability.service");
 
+const { registerDropsListingRoutes } = require("./drops/listing.routes");
+const { registerDropsAdminRoutes } = require("./drops/admin.routes");
+const { registerDropsPublicRoutes } = require("./drops/public.routes");
+const { registerDropsManageRoutes } = require("./drops/manage.routes");
+
 const router = express.Router();
 
 const BAD_REQUEST = { error: "bad_request" };
@@ -289,165 +294,6 @@ const upsertDropHeroMedia = async (trx, dropId, heroUrl) => {
   return normalizedHeroUrl;
 };
 
-router.get("/", async (req, res, next) => {
-  try {
-    if (isArtistDropsScope(req)) {
-      if (!req.user?.id) {
-        return res.status(401).json({ error: "unauthorized" });
-      }
-      const db = getDb();
-      const artistIds = await getArtistIdsForUser(db, req.user.id);
-      if (artistIds.length === 0) {
-        return res.json({ items: [] });
-      }
-
-      const includeArchived =
-        req.query?.includeArchived === "1" || req.query?.includeArchived === "true";
-
-      const query = db("drops")
-        .leftJoin("drop_products as dp", "dp.drop_id", "drops.id")
-        .leftJoin("entity_media_links as eml", function () {
-          this.on("eml.entity_id", "=", "drops.id")
-            .andOn("eml.entity_type", "=", db.raw("'drop'"))
-            .andOn("eml.role", "=", db.raw("'cover'"));
-        })
-        .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
-        .select(
-          "drops.id",
-          "drops.handle",
-          "drops.title",
-          "drops.description",
-          "ma.public_url as hero_image_url",
-          "drops.starts_at",
-          "drops.ends_at",
-          "drops.artist_id",
-          "drops.label_id",
-          "drops.status",
-          "drops.created_by_user_id",
-          "drops.created_at",
-          "drops.updated_at",
-          db.raw("count(distinct dp.product_id)::int as product_count")
-        )
-        .whereIn("drops.artist_id", artistIds)
-        .groupBy(
-          "drops.id",
-          "drops.handle",
-          "drops.title",
-          "drops.description",
-          "ma.public_url",
-          "drops.starts_at",
-          "drops.ends_at",
-          "drops.artist_id",
-          "drops.label_id",
-          "drops.status",
-          "drops.created_by_user_id",
-          "drops.created_at",
-          "drops.updated_at"
-        );
-
-      if (!includeArchived) {
-        query.whereNot("drops.status", "archived");
-      }
-
-      const rows = await query.orderBy("drops.created_at", "desc").limit(100);
-      const coverMap = await loadCoverUrlMap(
-        "drop",
-        rows.map((row) => row.id)
-      );
-      return res.json({
-        items: rows.map((row) => ({
-          ...formatDrop(row, coverMap.get(row.id)),
-          slug: row.handle,
-          start_at: row.starts_at,
-          end_at: row.ends_at,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-          artist_id: row.artist_id,
-          product_count: Number(row.product_count ?? 0),
-          productCount: Number(row.product_count ?? 0),
-        })),
-      });
-    }
-
-    if (isAdminDropsScope(req)) {
-      if (!req.user?.id) {
-        return res.status(401).json({ error: "unauthorized" });
-      }
-      if (req.user.role !== "admin") {
-        return res.status(403).json({ error: "forbidden" });
-      }
-
-      const db = getDb();
-      const rows = await db("drops")
-        .leftJoin("entity_media_links as eml", function () {
-          this.on("eml.entity_id", "=", "drops.id")
-            .andOn("eml.entity_type", "=", db.raw("'drop'"))
-            .andOn("eml.role", "=", db.raw("'cover'"));
-        })
-        .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
-        .select(
-          "drops.id",
-          "drops.handle",
-          "drops.title",
-          "drops.description",
-          "ma.public_url as hero_image_url",
-          "drops.starts_at",
-          "drops.ends_at",
-          "drops.artist_id",
-          "drops.label_id",
-          "drops.status",
-          "drops.created_by_user_id",
-          "drops.created_at",
-          "drops.updated_at"
-        )
-        .orderBy("drops.updated_at", "desc")
-        .limit(200);
-      const coverMap = await loadCoverUrlMap(
-        "drop",
-        rows.map((row) => row.id)
-      );
-      return res.json({
-        items: rows.map((row) => formatDrop(row, coverMap.get(row.id))),
-      });
-    }
-
-    const db = getDb();
-    const rows = await db("drops")
-      .leftJoin("entity_media_links as eml", function () {
-        this.on("eml.entity_id", "=", "drops.id")
-          .andOn("eml.entity_type", "=", db.raw("'drop'"))
-          .andOn("eml.role", "=", db.raw("'cover'"));
-      })
-      .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
-      .select(
-        "drops.id",
-        "drops.handle",
-        "drops.title",
-        "drops.description",
-        "ma.public_url as hero_image_url",
-        "drops.starts_at",
-        "drops.ends_at",
-        "drops.artist_id",
-        "drops.label_id",
-        "drops.status",
-        "drops.created_by_user_id",
-        "drops.created_at",
-        "drops.updated_at"
-      )
-      .where({ "drops.status": "published" })
-      .orderBy("drops.updated_at", "desc")
-      .limit(50);
-    const coverMap = await loadCoverUrlMap(
-      "drop",
-      rows.map((row) => row.id)
-    );
-    return res.json({
-      items: rows.map((row) => formatDrop(row, coverMap.get(row.id))),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
 
 const loadDropByIdentifier = async (identifier) => {
   if (!identifier) return null;
@@ -467,550 +313,6 @@ const normalizeHandle = (value) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
 
-router.get("/featured", async (req, res, next) => {
-  try {
-    const db = getDb();
-    const rows = await db("drops")
-      .leftJoin("entity_media_links as eml", function () {
-        this.on("eml.entity_id", "=", "drops.id")
-          .andOn("eml.entity_type", "=", db.raw("'drop'"))
-          .andOn("eml.role", "=", db.raw("'cover'"));
-      })
-      .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
-      .select(
-        "drops.id",
-        "drops.handle",
-        "drops.title",
-        "drops.description",
-        "ma.public_url as hero_image_url",
-        "drops.starts_at",
-        "drops.ends_at",
-        "drops.artist_id",
-        "drops.label_id",
-        "drops.status",
-        "drops.created_by_user_id",
-        "drops.created_at",
-        "drops.updated_at"
-      )
-      .where({ "drops.status": "published" })
-      .orderBy("drops.updated_at", "desc")
-      .limit(12);
-    const coverMap = await loadCoverUrlMap(
-      "drop",
-      rows.map((row) => row.id)
-    );
-    res.json({
-      items: rows.map((row) => formatDrop(row, coverMap.get(row.id))),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/:id/products", async (req, res, next) => {
-  try {
-    if (!isAdminDropsScope(req)) {
-      return next();
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const dropId = String(req.params?.id || "").trim();
-    if (!isUuid(dropId)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const db = getDb();
-    const drop = await db("drops").select("id").where({ id: dropId }).first();
-    if (!drop) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    const productsQuery = db("drop_products as dp")
-      .join("products as p", "p.id", "dp.product_id")
-      .select(
-        "p.id",
-        "p.title",
-        "p.artist_id",
-        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
-      )
-      .where("dp.drop_id", dropId)
-      .groupBy("p.id", "p.title", "p.artist_id")
-      .orderBy("p.title", "asc");
-    applySellableVariantExists(productsQuery, { productRef: "p.id" });
-    const rows = await productsQuery;
-
-    const productIds = rows.map((row) => row.id);
-    return res.json({
-      drop_id: dropId,
-      product_ids: productIds,
-      products: rows.map((row) => ({
-        id: row.id,
-        title: row.title,
-        artist_id: row.artist_id,
-        price_cents: row.price_cents == null ? null : Number(row.price_cents),
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.put("/:id/products", requireAuth, async (req, res, next) => {
-  try {
-    if (!isAdminDropsScope(req)) {
-      return next();
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const dropId = String(req.params?.id || "").trim();
-    if (!isUuid(dropId)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const body = req.body || {};
-    const productIdsRaw = body.product_ids;
-    if (!Array.isArray(productIdsRaw)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const normalizedProductIds = Array.from(
-      new Set(
-        productIdsRaw
-          .map((value) => String(value || "").trim())
-          .filter((value) => value.length > 0)
-      )
-    );
-
-    if (normalizedProductIds.some((id) => !isUuid(id))) {
-      return res.status(400).json({ error: "invalid_product_ids" });
-    }
-
-    const db = getDb();
-    const drop = await db("drops").select("id").where({ id: dropId }).first();
-    if (!drop) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    if (normalizedProductIds.length > 0) {
-      const existingProducts = await db("products")
-        .select("id")
-        .whereIn("id", normalizedProductIds);
-      const existingProductIds = new Set(existingProducts.map((row) => row.id));
-      const missing = normalizedProductIds.filter((id) => !existingProductIds.has(id));
-      if (missing.length > 0) {
-        return res.status(400).json({ error: "invalid_product_ids", missing });
-      }
-    }
-
-    await db.transaction(async (trx) => {
-      await trx("drop_products").where({ drop_id: dropId }).del();
-      if (normalizedProductIds.length > 0) {
-        const now = trx.fn.now();
-        const rows = normalizedProductIds.map((productId, index) => ({
-          drop_id: dropId,
-          product_id: productId,
-          sort_order: index,
-          created_at: now,
-        }));
-        await trx("drop_products").insert(rows);
-      }
-      await trx("drops").where({ id: dropId }).update({ updated_at: trx.fn.now() });
-    });
-
-    const updatedProductsQuery = db("drop_products as dp")
-      .join("products as p", "p.id", "dp.product_id")
-      .select(
-        "p.id",
-        "p.title",
-        "p.artist_id",
-        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
-      )
-      .where("dp.drop_id", dropId)
-      .groupBy("p.id", "p.title", "p.artist_id")
-      .orderBy("p.title", "asc");
-    applySellableVariantExists(updatedProductsQuery, { productRef: "p.id" });
-    const updatedRows = await updatedProductsQuery;
-
-    const updatedProductIds = updatedRows.map((row) => row.id);
-    return res.json({
-      drop_id: dropId,
-      product_ids: updatedProductIds,
-      products: updatedRows.map((row) => ({
-        id: row.id,
-        title: row.title,
-        artist_id: row.artist_id,
-        price_cents: row.price_cents == null ? null : Number(row.price_cents),
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/hero-image", requireAuth, rejectLabelMutations, async (req, res, next) => {
-  try {
-    if (!isAdminDropsScope(req)) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const dropId = String(req.params?.id || "").trim();
-    if (!isUuid(dropId)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const db = getDb();
-    const drop = await db("drops").select("id").where({ id: dropId }).first();
-    if (!drop) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    const multipart = await parseMultipartFormData(req);
-    if (!multipart || multipart.parseError) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-
-    const upload = multipart.file;
-    if (!upload || !upload.buffer?.length) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-    if (upload.fieldname !== "file" && upload.fieldname !== "image") {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-    if (upload.buffer.length > MAX_DROP_HERO_IMAGE_BYTES) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-    if (!ALLOWED_DROP_HERO_MIME_TYPES.has(upload.mimetype)) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-
-    const relativeUrl = await saveDropHeroImage(upload);
-
-    await db.transaction(async (trx) => {
-      await upsertDropHeroMedia(trx, dropId, relativeUrl);
-    });
-
-    const coverMap = await loadCoverUrlMap("drop", [dropId]);
-    const updatedDrop = await db("drops").where({ id: dropId }).first();
-    const heroImageUrl = coverMap.get(dropId) || relativeUrl;
-
-    return res.status(201).json({
-      ok: true,
-      public_url: relativeUrl,
-      heroImageUrl,
-      drop: formatDrop(updatedDrop, heroImageUrl),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) => {
-  try {
-    if (!isAdminDropsScope(req)) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const id = String(req.params?.id || "").trim();
-    if (!id) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const db = getDb();
-    const existing = await db("drops").where({ id }).first();
-    if (!existing) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    const body = req.body || {};
-    const updates = {};
-
-    if (Object.prototype.hasOwnProperty.call(body, "title")) {
-      const nextTitle = String(body.title || "").trim();
-      if (!nextTitle) {
-        return res.status(400).json(BAD_REQUEST);
-      }
-      updates.title = nextTitle;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, "handle")) {
-      const normalized = normalizeHandle(body.handle);
-      if (!normalized) {
-        return res.status(400).json(BAD_REQUEST);
-      }
-      const duplicate = await db("drops")
-        .whereRaw("lower(handle) = ?", [normalized])
-        .whereNot({ id })
-        .first();
-      if (duplicate) {
-        return res.status(409).json({ error: "handle_conflict" });
-      }
-      updates.handle = normalized;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, "description")) {
-      updates.description = body.description == null ? null : String(body.description);
-    }
-
-      // Removed: updates.hero_image_url = heroValue == null ? null : String(heroValue).trim() || null;
-      // This is now handled in the transaction below via entity_media_links.
-
-    const parseTimestamp = (value) => {
-      if (value == null || value === "") return null;
-      const parsed = new Date(value);
-      if (Number.isNaN(parsed.getTime())) return undefined;
-      return parsed.toISOString();
-    };
-
-    let startsAt = existing.starts_at;
-    let endsAt = existing.ends_at;
-
-    if (Object.prototype.hasOwnProperty.call(body, "starts_at")) {
-      const parsed = parseTimestamp(body.starts_at);
-      if (parsed === undefined) {
-        return res.status(400).json({ error: "invalid_starts_at" });
-      }
-      startsAt = parsed;
-      updates.starts_at = parsed;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, "ends_at")) {
-      const parsed = parseTimestamp(body.ends_at);
-      if (parsed === undefined) {
-        return res.status(400).json({ error: "invalid_ends_at" });
-      }
-      endsAt = parsed;
-      updates.ends_at = parsed;
-    }
-
-    if (startsAt && endsAt) {
-      const startsAtMs = new Date(startsAt).getTime();
-      const endsAtMs = new Date(endsAt).getTime();
-      if (endsAtMs < startsAtMs) {
-        return res.status(400).json({ error: "invalid_time_range" });
-      }
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, "quiz_json")) {
-      updates.quiz_json = body.quiz_json == null ? null : body.quiz_json;
-    }
-
-    await db.transaction(async (trx) => {
-      if (Object.keys(updates).length > 0) {
-        await trx("drops").where({ id }).update(updates);
-      }
-
-      if (
-        Object.prototype.hasOwnProperty.call(body, "hero_image_url") ||
-        Object.prototype.hasOwnProperty.call(body, "heroImageUrl")
-      ) {
-        const heroValue = Object.prototype.hasOwnProperty.call(body, "hero_image_url")
-          ? body.hero_image_url
-          : body.heroImageUrl;
-        const heroUrl = heroValue == null ? "" : String(heroValue).trim();
-        await upsertDropHeroMedia(trx, id, heroUrl);
-      }
-    });
-
-    const coverMap = await loadCoverUrlMap("drop", [id]);
-    const updated = await db("drops").where({ id }).first();
-    return res.json({ drop: formatDrop(updated, coverMap.get(id)) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/:handle", async (req, res, next) => {
-  try {
-    const { handle } = req.params;
-    if (!handle) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-    const drop = await loadPublishedDrop(handle);
-    if (!drop) {
-      return res.status(404).json(PUBLIC_NOT_FOUND);
-    }
-    const coverMap = await loadCoverUrlMap("drop", [drop.id]);
-    res.json({ drop: formatDrop(drop, coverMap.get(drop.id)) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/id/:id", setDropIdAliasDeprecationHeaders, async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    if (!id) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-    const drop = await loadPublishedDropById(id);
-    if (!drop) {
-      return res.status(404).json(PUBLIC_NOT_FOUND);
-    }
-    const coverMap = await loadCoverUrlMap("drop", [drop.id]);
-    res.json({ drop: formatDrop(drop, coverMap.get(drop.id)) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/:handle/products", async (req, res, next) => {
-  try {
-    const { handle } = req.params;
-    if (!handle) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-    const drop = await loadPublishedDrop(handle);
-    if (!drop) {
-      return res.status(404).json(PUBLIC_NOT_FOUND);
-    }
-    const db = getDb();
-    const productColumns = await db("products").columnInfo();
-    const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
-    const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
-    const productsQuery = db("drop_products as dp")
-      .join("products as p", "dp.product_id", "p.id")
-      .select(
-        "p.id",
-        "p.title",
-        "p.artist_id",
-        "p.is_active",
-        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
-      )
-      .where("dp.drop_id", drop.id);
-    applyPublicActiveProductFilter(productsQuery, {
-      productRef: "p",
-      hasStatus,
-      hasIsActive,
-    });
-    applySellableVariantExists(productsQuery, { productRef: "p.id" });
-    applyDropProductOrdering(productsQuery);
-    const rows = await productsQuery;
-    res.json({ items: rows.map(formatProduct) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post(
-  "/",
-  requireAuth,
-  rejectLabelMutations,
-  requirePolicy("drop:create", "self", createDropCtx),
-  async (req, res, next) => {
-    try {
-      if (isArtistDropsScope(req)) {
-        return res.status(403).json({ error: "forbidden" });
-      }
-      const isAdminScope = isAdminDropsScope(req);
-      const {
-        handle,
-        slug,
-        title,
-        description,
-        heroImageUrl,
-        artistId,
-        labelId,
-        startsAt,
-        endsAt,
-      } = req.body || {};
-
-      if (!title) {
-        return res.status(400).json(BAD_REQUEST);
-      }
-
-      if (isAdminScope && req.user.role !== "admin") {
-        return res.status(403).json({ error: "forbidden" });
-      }
-
-      const db = getDb();
-
-      let resolvedArtistId = artistId || null;
-      let resolvedLabelId = labelId || null;
-      if (!resolvedArtistId && !resolvedLabelId) {
-        if (isAdminScope) {
-          const fallbackArtist = await db("artists").select("id").orderBy("created_at", "asc").first();
-          if (fallbackArtist?.id) {
-            resolvedArtistId = fallbackArtist.id;
-          }
-        }
-      }
-
-      if (!resolvedArtistId && !resolvedLabelId) {
-        return res.status(400).json(BAD_REQUEST);
-      }
-
-      if (resolvedArtistId && resolvedLabelId) {
-        return res.status(400).json(BAD_REQUEST);
-      }
-
-      const rawHandle = handle || slug || title;
-      const normalizedHandle = normalizeHandle(rawHandle);
-      if (!normalizedHandle) {
-        return res.status(400).json(BAD_REQUEST);
-      }
-
-      let uniqueHandle = normalizedHandle;
-      let suffix = 1;
-      // Keep handles unique while preserving deterministic slugging.
-      while (await db("drops").where({ handle: uniqueHandle }).first()) {
-        suffix += 1;
-        uniqueHandle = `${normalizedHandle}-${suffix}`;
-      }
-
-      await db.transaction(async (trx) => {
-        const id = randomUUID();
-        const now = trx.fn.now();
-        await trx("drops").insert({
-          id,
-          handle: uniqueHandle,
-          title,
-          description: description || null,
-          status: "draft",
-          starts_at: startsAt || null,
-          ends_at: endsAt || null,
-          artist_id: resolvedArtistId,
-          label_id: resolvedLabelId,
-          created_by_user_id: req.user.id,
-          created_at: now,
-          updated_at: now,
-        });
-
-        const heroUrl = (heroImageUrl || "").trim();
-        if (heroUrl) {
-          await upsertDropHeroMedia(trx, id, heroUrl);
-        }
-
-        const drop = await trx("drops").where({ id }).first();
-        const coverUrl = heroUrl || null;
-        res.status(201).json({ drop: formatDrop(drop, coverUrl) });
-      });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
 
 const formatDrop = (row, coverUrl = null) => {
   if (!row) return null;
@@ -1127,185 +429,72 @@ function rejectLabelMutations(req, res, next) {
 }
 
 
-router.post(
-  "/:handle/products",
+
+registerDropsListingRoutes(router, {
+  getDb,
+  isArtistDropsScope,
+  isAdminDropsScope,
+  getArtistIdsForUser,
+  loadCoverUrlMap,
+  formatDrop,
+});
+
+registerDropsAdminRoutes(router, {
   requireAuth,
   rejectLabelMutations,
-  attachDrop,
-  requirePolicy("drop:add-product", "self", manageDropCtx),
-  async (req, res, next) => {
-    try {
-      if (isArtistDropsScope(req)) {
-        return res.status(403).json({ error: "forbidden" });
-      }
-      const productId = req.body?.productId;
-      const sortOrder =
-        typeof req.body?.sortOrder === "number" ? req.body.sortOrder : 0;
-      if (!productId) {
-        return res.status(400).json(BAD_REQUEST);
-      }
+  isAdminDropsScope,
+  isUuid,
+  BAD_REQUEST,
+  NOT_FOUND,
+  getDb,
+  buildSellableMinPriceSubquery,
+  applySellableVariantExists,
+  parseMultipartFormData,
+  MAX_DROP_HERO_IMAGE_BYTES,
+  ALLOWED_DROP_HERO_MIME_TYPES,
+  saveDropHeroImage,
+  upsertDropHeroMedia,
+  loadCoverUrlMap,
+  formatDrop,
+  normalizeHandle,
+});
 
-      const db = getDb();
-      const product = await db("products").where({ id: productId }).first();
-      if (!product) {
-        return res.status(404).json(PRODUCT_NOT_FOUND);
-      }
+registerDropsPublicRoutes(router, {
+  setDropIdAliasDeprecationHeaders,
+  BAD_REQUEST,
+  PUBLIC_NOT_FOUND,
+  loadPublishedDrop,
+  loadPublishedDropById,
+  loadCoverUrlMap,
+  formatDrop,
+  getDb,
+  buildSellableMinPriceSubquery,
+  applyPublicActiveProductFilter,
+  applySellableVariantExists,
+  applyDropProductOrdering,
+  formatProduct,
+});
 
-      if (req.user?.role !== "admin") {
-        if (req.drop.artist_id) {
-          if (product.artist_id !== req.drop.artist_id) {
-            return res.status(403).json({ error: "forbidden" });
-          }
-          const owns = await isUserLinkedToArtist(
-            db,
-            req.user.id,
-            req.drop.artist_id
-          );
-          if (!owns) {
-            return res.status(403).json({ error: "forbidden" });
-          }
-        } else if (req.drop.label_id) {
-          const owns = await isLabelLinkedToArtist(
-            db,
-            req.drop.label_id,
-            product.artist_id
-          );
-          if (!owns) {
-            return res.status(403).json({ error: "forbidden" });
-          }
-        } else {
-          return res.status(403).json({ error: "forbidden" });
-        }
-      }
-
-      await db("drop_products")
-        .insert({
-          drop_id: req.drop.id,
-          product_id: productId,
-          sort_order: sortOrder,
-          created_at: db.fn.now(),
-        })
-        .onConflict(["drop_id", "product_id"])
-        .merge({ sort_order: sortOrder });
-
-      res.json({ ok: true });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-router.post(
-  "/:handle/publish",
+registerDropsManageRoutes(router, {
   requireAuth,
   rejectLabelMutations,
+  requirePolicy,
+  createDropCtx,
+  manageDropCtx,
   attachDrop,
-  requirePolicy("drop:publish", "self", manageDropCtx),
-  async (req, res, next) => {
-    try {
-      if (isArtistDropsScope(req)) {
-        const db = getDb();
-        const owns = req.drop.artist_id
-          ? await isUserLinkedToArtist(db, req.user.id, req.drop.artist_id)
-          : false;
-        if (!owns) {
-          return res.status(403).json({ error: "forbidden" });
-        }
-        if (req.drop.status === "archived") {
-          return res.status(400).json({ error: "invalid_status_transition" });
-        }
-        if (req.drop.status === "published") {
-          return res.json({ drop: formatDrop(req.drop) });
-        }
-        if (req.drop.status !== "draft") {
-          return res.status(400).json({ error: "invalid_status_transition" });
-        }
-      }
-
-      const db = getDb();
-      const count = await db("drop_products")
-        .where({ drop_id: req.drop.id })
-        .count("product_id as total")
-        .first();
-      if (!count || Number(count.total) === 0) {
-        return res.status(400).json(DROP_REQUIRES_PRODUCTS);
-      }
-
-      await db("drops")
-        .where({ id: req.drop.id })
-        .update({ status: "published", updated_at: db.fn.now() });
-
-      const drop = await db("drops").where({ id: req.drop.id }).first();
-      res.json({ drop: formatDrop(drop) });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-router.post(
-  "/:handle/unpublish",
-  requireAuth,
-  rejectLabelMutations,
-  attachDrop,
-  requirePolicy("drop:unpublish", "self", manageDropCtx),
-  async (req, res, next) => {
-    try {
-      if (isArtistDropsScope(req)) {
-        const db = getDb();
-        const owns = req.drop.artist_id
-          ? await isUserLinkedToArtist(db, req.user.id, req.drop.artist_id)
-          : false;
-        if (!owns) {
-          return res.status(403).json({ error: "forbidden" });
-        }
-        if (req.drop.status === "archived") {
-          return res.status(400).json({ error: "invalid_status_transition" });
-        }
-        if (req.drop.status === "draft") {
-          return res.json({ drop: formatDrop(req.drop) });
-        }
-        if (req.drop.status !== "published") {
-          return res.status(400).json({ error: "invalid_status_transition" });
-        }
-      }
-
-      const db = getDb();
-      await db("drops")
-        .where({ id: req.drop.id })
-        .update({ status: "draft", updated_at: db.fn.now() });
-
-      const drop = await db("drops").where({ id: req.drop.id }).first();
-      res.json({ drop: formatDrop(drop) });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-router.post(
-  "/:handle/archive",
-  requireAuth,
-  rejectLabelMutations,
-  attachDrop,
-  requirePolicy("drop:archive", "self", manageDropCtx),
-  async (req, res, next) => {
-    try {
-      if (isArtistDropsScope(req)) {
-        return res.status(403).json({ error: "forbidden" });
-      }
-      const db = getDb();
-      await db("drops")
-        .where({ id: req.drop.id })
-        .update({ status: "archived", updated_at: db.fn.now() });
-
-      const drop = await db("drops").where({ id: req.drop.id }).first();
-      res.json({ drop: formatDrop(drop) });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
+  isArtistDropsScope,
+  isAdminDropsScope,
+  BAD_REQUEST,
+  PRODUCT_NOT_FOUND,
+  DROP_REQUIRES_PRODUCTS,
+  getDb,
+  randomUUID,
+  normalizeHandle,
+  upsertDropHeroMedia,
+  formatDrop,
+  isUserLinkedToArtist,
+  isLabelLinkedToArtist,
+});
 
 module.exports = router;
 module.exports.__test = {

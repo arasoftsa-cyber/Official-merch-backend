@@ -1,6 +1,7 @@
 const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
+const env = require("./src/core/config/env");
 const { getDb } = require("./src/core/db/db");
 const { UPLOADS_DIR } = require("./src/core/config/paths");
 const { ensureUploadDir } = require("./src/core/config/uploadPaths");
@@ -8,6 +9,13 @@ const { logRequest } = require("./src/core/http/logger");
 const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
+const { getEmailConfigReadiness } = require("./src/services/email.service");
+const {
+  frontendOrigin,
+  backendBaseUrl,
+  getOriginConfigReadiness,
+} = require("./src/config/appOrigin");
+const createHealthRouter = require("./src/routes/health.routes");
 const router = require("./src/routes/index");
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,31 +27,8 @@ const logStartupDebug = (...args) => {
     console.log(...args);
   }
 };
-const splitCsv = (value) =>
-  String(value || "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-
-// 1. Define your allowed domains
-const configuredCorsOrigins = splitCsv(process.env.CORS_ORIGINS);
-const devCorsOrigins = ["http://localhost:5173", "http://localhost:5174"];
-const allowedOrigins = isProduction
-  ? [...new Set(configuredCorsOrigins)]
-  : [...new Set([...devCorsOrigins, ...configuredCorsOrigins])];
-
-// 2. Configure CORS options
 const corsOptions = {
-  origin: function (origin, callback) {
-    // allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: frontendOrigin,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
@@ -56,7 +41,6 @@ const corsOptions = {
   credentials: true,
 };
 
-// 3. Apply the middleware
 app.use(cors(corsOptions));
 app.use(helmet({
   contentSecurityPolicy: {
@@ -122,6 +106,14 @@ app.use(attachAuthUser);
 app.use(requestId);
 app.use(logRequest);
 
+app.use(
+  "/api",
+  createHealthRouter({
+    getDb,
+    getEmailConfigReadiness,
+    getOriginConfigReadiness,
+  })
+);
 app.use("/api", router);
 
 app.use((err, req, res, next) => {
@@ -210,6 +202,40 @@ const seedArtistAccessRequestsIfEmpty = async () => {
   }
 };
 
+const ensureRequiredAuthSecrets = () => {
+  if (process.env.NODE_ENV === "test") return;
+
+  const requiredSecrets = ["JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET"];
+  const missingSecrets = requiredSecrets.filter(
+    (envKey) => !String(process.env[envKey] || "").trim()
+  );
+
+  if (missingSecrets.length === 0) return;
+
+  const readableList = missingSecrets.map((envKey) => `- ${envKey}`).join("\n");
+  console.error(`Missing required auth secrets:\n${readableList}`);
+  throw new Error(
+    `Missing required auth secrets: ${missingSecrets.join(", ")}`
+  );
+};
+
+const ensureRefreshSecretSeparation = () => {
+  if (process.env.NODE_ENV === "test") return;
+
+  const refreshSecret = String(process.env.JWT_REFRESH_SECRET || "").trim();
+  const accessSecret = String(
+    process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || ""
+  ).trim();
+
+  if (!refreshSecret || !accessSecret) return;
+  if (refreshSecret !== accessSecret) return;
+
+  const message =
+    "JWT_REFRESH_SECRET must be different from the access/token signing secret";
+  console.error(`[startup] ${message}`);
+  throw new Error(message);
+};
+
 const ensureSeededUserRoles = async () => {
   if (process.env.NODE_ENV !== "development") return;
   try {
@@ -235,10 +261,52 @@ const ensureSeededUserRoles = async () => {
 };
 
 const startServer = async () => {
+  ensureRequiredAuthSecrets();
+  ensureRefreshSecretSeparation();
+
+  const originReadiness =
+    typeof getOriginConfigReadiness === "function"
+      ? getOriginConfigReadiness()
+      : { ready: false, missing: ["origin_config_unavailable"] };
+  if (originReadiness.ready === false) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        `[startup] missing required origin config: ${originReadiness.missing.join(", ")}`
+      );
+    }
+    console.warn("[startup] origin config incomplete", {
+      missing: originReadiness.missing,
+      frontendOrigin: originReadiness.frontendOrigin || null,
+      backendBaseUrl: originReadiness.backendBaseUrl || null,
+    });
+  }
+
+  const emailReadiness = getEmailConfigReadiness();
+  const envDiagnostics =
+    typeof env.getEnvDiagnostics === "function"
+      ? env.getEnvDiagnostics()
+      : { loadedFiles: [] };
+  console.log("[startup] email config readiness", {
+    configured: emailReadiness.configured,
+    apiKeyPresent: emailReadiness.apiKeyPresent,
+    fromEmailPresent: emailReadiness.fromEmailPresent,
+    fromNamePresent: emailReadiness.fromNamePresent,
+    envFiles: envDiagnostics.loadedFiles,
+    originReady: originReadiness.ready,
+    originMissing: originReadiness.missing,
+  });
+  if (!emailReadiness.configured) {
+    console.warn("[startup] transactional email disabled (missing env)", {
+      missingRequired: emailReadiness.missingRequired,
+      missingOptional: emailReadiness.missingOptional,
+    });
+  }
+
   await ensureSeededUserRoles();
   await seedArtistAccessRequestsIfEmpty();
   const server = app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    const runningUrl = backendBaseUrl || `http://0.0.0.0:${PORT}`;
+    console.log(`Server running on ${runningUrl}`);
   });
   return server;
 };

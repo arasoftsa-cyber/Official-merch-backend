@@ -9,11 +9,18 @@ const { isLockedOut, recordFailedAttempt, clearFailedAttempts, getRemainingLocko
 const authService = require("../services/auth.service");
 const userService = require("../services/user.service");
 const oidcService = require("../services/oidc.service");
+const passwordResetService = require("../services/passwordReset.service");
+const { sendEmailByTemplate } = require("../services/email.service");
+const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
+const { frontendOrigin } = require("../config/appOrigin");
 
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
 const FAN_ALLOWED_ROLES = new Set(["buyer", "fan"]);
 const authDebugEnabled = process.env.AUTH_DEBUG === "1";
 const DEFAULT_OIDC_APP_CALLBACK_PATH = "/auth/oidc/callback";
+const PASSWORD_FORGOT_GENERIC_MESSAGE =
+  "If an account exists for this email, a password reset link has been sent.";
+const WELCOME_DEFAULT_LOGIN_PATH = "/fan/login";
 
 const logPartnerLogin = (...args) => {
   if (!authDebugEnabled) return;
@@ -112,7 +119,7 @@ const appendQuery = (baseUrl, query) => {
   const safeBase = rawBase || "/";
   const url = isAbsolute
     ? new URL(safeBase)
-    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, "http://localhost");
+    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, frontendOrigin || "http://example.com");
   for (const [key, value] of Object.entries(query || {})) {
     if (value === undefined || value === null || value === "") continue;
     url.searchParams.set(key, String(value));
@@ -336,6 +343,10 @@ const register = async (req, res) => {
       passwordHash,
       role: "buyer",
     });
+    void sendWelcomeAccountEmailBestEffort({
+      email: user?.email || normalizedEmail,
+      source: "auth_register",
+    });
 
     const tokens = await authService.issueAuthTokensForUser({ user });
     return res.status(200).json({
@@ -350,6 +361,90 @@ const register = async (req, res) => {
   } catch (err) {
     console.error("[auth.register] failed", err);
     return fail(res, 500, "internal_server_error", "Failed to register");
+  }
+};
+
+const sendWelcomeAccountEmailBestEffort = async ({ email, source }) => {
+  try {
+    const recipient = String(email || "").trim().toLowerCase();
+    if (!recipient) return;
+
+    const loginUrl = buildPublicAppUrl({ path: WELCOME_DEFAULT_LOGIN_PATH });
+    const appUrl = buildPublicAppUrl({ path: "/" });
+    const result = await sendEmailByTemplate({
+      templateKey: "welcome-account",
+      to: recipient,
+      payload: {
+        appUrl,
+        loginUrl,
+      },
+      metadata: {
+        flow: "welcome_account",
+        source: String(source || "").trim() || "unknown",
+      },
+    });
+
+    if (result.errorCode && !result.skipped) {
+      console.warn("[auth.welcomeEmail] failed", result.errorCode);
+    }
+  } catch (err) {
+    console.warn("[auth.welcomeEmail] failed", err?.code || err?.message || err);
+  }
+};
+
+const passwordForgot = async (req, res) => {
+  const email = String(req.body?.email || "").trim();
+  try {
+    await passwordResetService.issuePasswordReset({ email });
+  } catch (err) {
+    console.warn("[auth.passwordForgot] failed", err?.code || err?.message || err);
+  }
+
+  return ok(res, {
+    ok: true,
+    message: PASSWORD_FORGOT_GENERIC_MESSAGE,
+  });
+};
+
+const passwordReset = async (req, res) => {
+  try {
+    const token = String(req.body?.token || "").trim();
+    const password = String(req.body?.password || "");
+
+    if (!token || !password) {
+      return fail(res, 400, "validation_error", "token and password are required");
+    }
+    if (!validatePasswordStrength(password)) {
+      return fail(
+        res,
+        400,
+        "validation_error",
+        "Password must be at least 12 characters and include uppercase, lowercase, numbers, and special characters"
+      );
+    }
+
+    const result = await passwordResetService.resetPassword({ token, password });
+    if (!result?.ok) {
+      return fail(
+        res,
+        400,
+        "invalid_or_expired_token",
+        "Password reset token is invalid or expired"
+      );
+    }
+
+    return ok(res, { ok: true, message: "Password has been reset successfully" });
+  } catch (err) {
+    if (err?.code === "PASSWORD_RESET_NOT_CONFIGURED") {
+      return fail(
+        res,
+        503,
+        "service_unavailable",
+        "Password reset is temporarily unavailable"
+      );
+    }
+    console.error("[auth.passwordReset] failed", err);
+    return fail(res, 500, "internal_server_error", "Failed to reset password");
   }
 };
 
@@ -385,7 +480,7 @@ const oidcGoogleCallback = async (req, res) => {
   let callbackContext = {
     portal: "fan",
     returnTo: "/fan",
-    appOrigin: "http://localhost:5173",
+    appOrigin: frontendOrigin,
   };
 
   try {
@@ -433,6 +528,10 @@ const oidcGoogleCallback = async (req, res) => {
         oidcSub: callbackData.sub,
         avatarUrl: callbackData.avatarUrl,
         emailVerified: callbackData.emailVerified,
+      });
+      void sendWelcomeAccountEmailBestEffort({
+        email: createdUser?.email || callbackData.email,
+        source: "oidc_fan_signup",
       });
       const authPayload = await buildAuthResponse(createdUser);
       const exchangeCode = oidcService.issueExchangeCode(authPayload);
@@ -557,6 +656,8 @@ module.exports = {
   fanLogin,
   partnerLogin,
   register,
+  passwordForgot,
+  passwordReset,
   oidcGoogleStart,
   oidcGoogleCallback,
   oidcGoogleExchange,
