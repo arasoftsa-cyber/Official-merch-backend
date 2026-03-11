@@ -13,32 +13,6 @@ const { registerAdminSeedRoutes } = require("./admin/seed.routes");
 const { registerAdminOrderRoutes } = require("./admin/orders.routes");
 const { registerAdminPaymentRoutes } = require("./admin/payments.routes");
 
-const { ensureAdmin } = require("./admin/shared/ensureAdmin");
-const { formatDashboardSummary } = require("./admin/dashboard.helpers");
-const {
-  REGISTER_TEST_SEED_ROUTES,
-  TEST_SEEDS_ENABLED,
-  TEST_BUYER_ID,
-  MAX_SEEDED_ORDERS,
-  ensureArtistForSeed,
-  ensureProductVariantForSeed,
-} = require("./admin/seed.helpers");
-const {
-  ORDER_NOT_FOUND,
-  ORDER_NOT_FULFILLABLE,
-  ORDER_NOT_PAID,
-  ORDER_NOT_REFUNDABLE,
-  formatItem,
-  formatOrder,
-  formatEvent,
-  sendShipmentDispatchedEmailBestEffort,
-  sendOrderStatusUpdateEmailBestEffort,
-} = require("./admin/orders.helpers");
-
-const { registerAdminDashboardRoutes } = require("./admin/dashboard.routes");
-const { registerAdminSeedRoutes } = require("./admin/seed.routes");
-const { registerAdminOrderRoutes } = require("./admin/orders.routes");
-const { registerAdminPaymentRoutes } = require("./admin/payments.routes");
 const { registerAdminArtistRoutes, __test: adminArtistRoutesTest } = require("./admin/artist/routes");
 
 const FORBIDDEN = { error: "forbidden" };
@@ -543,7 +517,6 @@ const ensureProductVariantForSeed = async (db, artistId, minStock) => {
 };
 
 const router = express.Router();
-const PAYMENT_NOT_FOUND = { error: "payment_not_found" };
 
 registerAdminDashboardRoutes(router, {
   requireAuth,
@@ -595,27 +568,9 @@ registerAdminPaymentRoutes(router, {
 router.post(
   "/artists/:artistId/link-user",
   requireAuth,
-  requirePolicy,
-  ensureAdmin,
-  getDb,
-  formatOrder,
-  formatItem,
-  formatEvent,
-  ORDER_NOT_FOUND,
-  ORDER_NOT_FULFILLABLE,
-  ORDER_NOT_PAID,
-  ORDER_NOT_REFUNDABLE,
-  sendShipmentDispatchedEmailBestEffort,
-  sendOrderStatusUpdateEmailBestEffort,
-});
-
-registerAdminPaymentRoutes(router, {
-  requireAuth,
-  ensureAdmin,
-  getDb,
-  PAYMENT_NOT_FOUND,
-  listFlags,
-});
+  LINK_POLICY,
+  handleLinkArtistUser
+);
 
 registerAdminArtistRoutes(router, {
   ensureAdmin,
@@ -627,3 +582,4 @@ module.exports.__test = {
   updateArtistSubscriptionAction: adminArtistRoutesTest.updateArtistSubscriptionAction,
   reconcileArtistUserMapping: adminArtistRoutesTest.reconcileArtistUserMapping,
 };
+

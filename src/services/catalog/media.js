@@ -9,7 +9,6 @@ const { PRODUCT_UPLOAD_DIR } = require("./constants");
 const { getStorageProvider } = require("../../storage");
 const { finalizeUploadedMedia } = require("../../storage/mediaUploadLifecycle");
 const { createMediaAsset } = require("../mediaAssets.service");
-const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
 const storageProvider = getStorageProvider();
 
 const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
@@ -25,15 +24,6 @@ const saveProductMediaFiles = async ({ trx, productId, files = [], role = "listi
     const extRaw = path.extname(file.originalname || "").slice(0, 12);
     const ext = /^[.][a-z0-9]+$/i.test(extRaw) ? extRaw.toLowerCase() : "";
     const filename = `${Date.now()}-${randomUUID()}${ext}`;
-    const absolutePath = path.join(PRODUCT_UPLOAD_DIR, filename);
-    await fs.promises.writeFile(absolutePath, file.buffer);
-
-    const publicUrl = `/uploads/products/${filename}`;
-    const mediaAssetId = randomUUID();
-    await trx("media_assets").insert({
-      id: mediaAssetId,
-      public_url: publicUrl,
-      created_at: trx.fn.now(),
     const relativePath = path.posix.join("products", filename);
     const saved = await storageProvider.saveFile({
       relativePath,
