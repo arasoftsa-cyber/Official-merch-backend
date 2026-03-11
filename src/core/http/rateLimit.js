@@ -4,6 +4,8 @@ const { recordFlag } = require("../../utils/abuseFlags");
 const NODE_ENV = String(process.env.NODE_ENV || "").toLowerCase();
 const RATE_LIMIT_DISABLED = process.env.DISABLE_RATE_LIMIT === "1";
 const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
+const RATE_LIMIT_DEBUG =
+  DEBUG_STARTUP || /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_RATE_LIMIT || "").trim());
 if (DEBUG_STARTUP) {
   console.log(
     `[rate-limit] disabled=${RATE_LIMIT_DISABLED} env=${NODE_ENV || ""} flag=${String(
@@ -14,7 +16,8 @@ if (DEBUG_STARTUP) {
 
 const isAuthLimiterBypassRoute = (req) => {
   const smokeHeader = req.headers["x-smoke-test"];
-  return smokeHeader === "1";
+  // Keep smoke bypass only for local test/development runs.
+  return smokeHeader === "1" && (NODE_ENV === "test" || NODE_ENV === "development");
 };
 
 const rateLimit = ({ windowMs = 60_000, max = 10, keyGenerator = (req) => req.ip } = {}) => {
@@ -36,7 +39,9 @@ const rateLimit = ({ windowMs = 60_000, max = 10, keyGenerator = (req) => req.ip
     if (bucket.count > max) {
       const retryAfter = Math.ceil((bucket.expiresAt - now) / 1000);
       res.set("Retry-After", String(retryAfter));
-      console.log("[rate-limit] HIT", req.method, req.originalUrl, "ip=", req.ip);
+      if (RATE_LIMIT_DEBUG) {
+        console.log("[rate-limit] HIT", req.method, req.originalUrl, "ip=", req.ip);
+      }
       recordFlag({
         type: "rate_limit",
         key,

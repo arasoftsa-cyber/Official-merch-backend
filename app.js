@@ -10,7 +10,12 @@ const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
 const { getEmailConfigReadiness } = require("./src/services/email.service");
-const { frontendOrigin, backendBaseUrl } = require("./src/config/appOrigin");
+const {
+  frontendOrigin,
+  backendBaseUrl,
+  getOriginConfigReadiness,
+} = require("./src/config/appOrigin");
+const createHealthRouter = require("./src/routes/health.routes");
 const router = require("./src/routes/index");
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -101,6 +106,14 @@ app.use(attachAuthUser);
 app.use(requestId);
 app.use(logRequest);
 
+app.use(
+  "/api",
+  createHealthRouter({
+    getDb,
+    getEmailConfigReadiness,
+    getOriginConfigReadiness,
+  })
+);
 app.use("/api", router);
 
 app.use((err, req, res, next) => {
@@ -189,6 +202,40 @@ const seedArtistAccessRequestsIfEmpty = async () => {
   }
 };
 
+const ensureRequiredAuthSecrets = () => {
+  if (process.env.NODE_ENV === "test") return;
+
+  const requiredSecrets = ["JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET"];
+  const missingSecrets = requiredSecrets.filter(
+    (envKey) => !String(process.env[envKey] || "").trim()
+  );
+
+  if (missingSecrets.length === 0) return;
+
+  const readableList = missingSecrets.map((envKey) => `- ${envKey}`).join("\n");
+  console.error(`Missing required auth secrets:\n${readableList}`);
+  throw new Error(
+    `Missing required auth secrets: ${missingSecrets.join(", ")}`
+  );
+};
+
+const ensureRefreshSecretSeparation = () => {
+  if (process.env.NODE_ENV === "test") return;
+
+  const refreshSecret = String(process.env.JWT_REFRESH_SECRET || "").trim();
+  const accessSecret = String(
+    process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || ""
+  ).trim();
+
+  if (!refreshSecret || !accessSecret) return;
+  if (refreshSecret !== accessSecret) return;
+
+  const message =
+    "JWT_REFRESH_SECRET must be different from the access/token signing secret";
+  console.error(`[startup] ${message}`);
+  throw new Error(message);
+};
+
 const ensureSeededUserRoles = async () => {
   if (process.env.NODE_ENV !== "development") return;
   try {
@@ -214,6 +261,26 @@ const ensureSeededUserRoles = async () => {
 };
 
 const startServer = async () => {
+  ensureRequiredAuthSecrets();
+  ensureRefreshSecretSeparation();
+
+  const originReadiness =
+    typeof getOriginConfigReadiness === "function"
+      ? getOriginConfigReadiness()
+      : { ready: false, missing: ["origin_config_unavailable"] };
+  if (originReadiness.ready === false) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        `[startup] missing required origin config: ${originReadiness.missing.join(", ")}`
+      );
+    }
+    console.warn("[startup] origin config incomplete", {
+      missing: originReadiness.missing,
+      frontendOrigin: originReadiness.frontendOrigin || null,
+      backendBaseUrl: originReadiness.backendBaseUrl || null,
+    });
+  }
+
   const emailReadiness = getEmailConfigReadiness();
   const envDiagnostics =
     typeof env.getEnvDiagnostics === "function"
@@ -225,6 +292,8 @@ const startServer = async () => {
     fromEmailPresent: emailReadiness.fromEmailPresent,
     fromNamePresent: emailReadiness.fromNamePresent,
     envFiles: envDiagnostics.loadedFiles,
+    originReady: originReadiness.ready,
+    originMissing: originReadiness.missing,
   });
   if (!emailReadiness.configured) {
     console.warn("[startup] transactional email disabled (missing env)", {

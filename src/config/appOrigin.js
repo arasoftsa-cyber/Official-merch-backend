@@ -59,6 +59,21 @@ const resolveBackendBaseUrl = () => {
 const frontendOrigin = resolveFrontendOrigin();
 const backendBaseUrl = resolveBackendBaseUrl();
 
+const getOriginConfigReadiness = () => {
+  const missing = [];
+  if (!frontendOrigin) missing.push("frontendOrigin");
+  if (!backendBaseUrl) missing.push("backendBaseUrl");
+  return {
+    frontendOrigin,
+    backendBaseUrl,
+    ready: missing.length === 0,
+    missing,
+    isProduction,
+    isTest,
+    isCi,
+  };
+};
+
 module.exports = {
   isProduction,
   isTest,
@@ -67,4 +82,5 @@ module.exports = {
   resolveBackendBaseUrl,
   frontendOrigin,
   backendBaseUrl,
+  getOriginConfigReadiness,
 };
