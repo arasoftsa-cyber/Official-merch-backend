@@ -12,6 +12,7 @@ const oidcService = require("../services/oidc.service");
 const passwordResetService = require("../services/passwordReset.service");
 const { sendEmailByTemplate } = require("../services/email.service");
 const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
+const { frontendOrigin } = require("../config/appOrigin");
 
 const PARTNER_ALLOWED_ROLES = new Set(["admin", "artist", "label"]);
 const FAN_ALLOWED_ROLES = new Set(["buyer", "fan"]);
@@ -118,7 +119,7 @@ const appendQuery = (baseUrl, query) => {
   const safeBase = rawBase || "/";
   const url = isAbsolute
     ? new URL(safeBase)
-    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, "http://localhost");
+    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, frontendOrigin || "http://example.com");
   for (const [key, value] of Object.entries(query || {})) {
     if (value === undefined || value === null || value === "") continue;
     url.searchParams.set(key, String(value));
@@ -479,7 +480,7 @@ const oidcGoogleCallback = async (req, res) => {
   let callbackContext = {
     portal: "fan",
     returnTo: "/fan",
-    appOrigin: "http://localhost:5173",
+    appOrigin: frontendOrigin,
   };
 
   try {

@@ -1,4 +1,5 @@
 const HTTP_URL_RE = /^https?:\/\//i;
+const { backendBaseUrl } = require("../config/appOrigin");
 
 const trimTrailingSlash = (value) => String(value || "").replace(/\/+$/, "");
 
@@ -9,7 +10,7 @@ const getBackendPublicBaseUrl = () => {
     process.env.PUBLIC_BASE_URL ||
     "";
   if (envBase) return trimTrailingSlash(envBase);
-  return `http://127.0.0.1:${process.env.PORT || 3000}`;
+  return backendBaseUrl;
 };
 
 const toAbsolutePublicUrl = (value) => {
@@ -24,4 +25,3 @@ module.exports = {
   getBackendPublicBaseUrl,
   toAbsolutePublicUrl,
 };
-

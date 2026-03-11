@@ -10,6 +10,7 @@ const { attachAuthUser } = require("./src/core/http/auth.middleware");
 const { requestId } = require("./src/core/http/requestId");
 const { fail } = require("./src/core/http/errorResponse");
 const { getEmailConfigReadiness } = require("./src/services/email.service");
+const { frontendOrigin, backendBaseUrl } = require("./src/config/appOrigin");
 const router = require("./src/routes/index");
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,31 +22,8 @@ const logStartupDebug = (...args) => {
     console.log(...args);
   }
 };
-const splitCsv = (value) =>
-  String(value || "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-
-// 1. Define your allowed domains
-const configuredCorsOrigins = splitCsv(process.env.CORS_ORIGINS);
-const devCorsOrigins = ["http://localhost:5173", "http://localhost:5174"];
-const allowedOrigins = isProduction
-  ? [...new Set(configuredCorsOrigins)]
-  : [...new Set([...devCorsOrigins, ...configuredCorsOrigins])];
-
-// 2. Configure CORS options
 const corsOptions = {
-  origin: function (origin, callback) {
-    // allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: frontendOrigin,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
@@ -58,7 +36,6 @@ const corsOptions = {
   credentials: true,
 };
 
-// 3. Apply the middleware
 app.use(cors(corsOptions));
 app.use(helmet({
   contentSecurityPolicy: {
@@ -259,7 +236,8 @@ const startServer = async () => {
   await ensureSeededUserRoles();
   await seedArtistAccessRequestsIfEmpty();
   const server = app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    const runningUrl = backendBaseUrl || `http://0.0.0.0:${PORT}`;
+    console.log(`Server running on ${runningUrl}`);
   });
   return server;
 };

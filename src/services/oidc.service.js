@@ -3,6 +3,11 @@
 const { Issuer, generators } = require("openid-client");
 const jwt = require("jsonwebtoken");
 const { randomUUID } = require("crypto");
+const {
+  frontendOrigin,
+  backendBaseUrl,
+  isProduction,
+} = require("../config/appOrigin");
 
 const DEFAULT_PORTAL_RETURN_TO = Object.freeze({
   fan: "/fan",
@@ -12,7 +17,6 @@ const ALLOWED_PORTALS = new Set(["fan", "partner"]);
 const STATE_TTL_SECONDS = 10 * 60;
 const EXCHANGE_CODE_TTL_MS = 60 * 1000;
 const OIDC_CALLBACK_PATH = "/api/auth/oidc/google/callback";
-const DEFAULT_DEV_FRONTEND_ORIGIN = "http://localhost:5173";
 const DEFAULT_APP_CALLBACK_PATH = "/auth/oidc/callback";
 const FRONTEND_ORIGIN_ENV_KEYS = [
   "OIDC_APP_BASE_URL",
@@ -72,7 +76,7 @@ const parseDiscoveryUrl = (rawValue) => {
 const normalizeRedirectUri = (rawValue) => {
   const value = String(rawValue || "").trim();
   if (!value) {
-    throw asOidcMisconfigured("OIDC_REDIRECT_URI is required for OIDC");
+    throw asOidcMisconfigured("Unable to resolve OIDC redirect URI");
   }
 
   let parsed;
@@ -123,11 +127,27 @@ const getOidcConfig = () => {
     throw asOidcMisconfigured("OIDC_CLIENT_SECRET is required for OIDC");
   }
 
+  const explicitRedirectUri = String(process.env.OIDC_REDIRECT_URI || "").trim();
+  const resolvedRedirectUri = explicitRedirectUri
+    ? normalizeRedirectUri(explicitRedirectUri)
+    : backendBaseUrl
+      ? normalizeRedirectUri(`${backendBaseUrl}${OIDC_CALLBACK_PATH}`)
+      : "";
+
+  if (!resolvedRedirectUri) {
+    if (isProduction) {
+      throw asOidcMisconfigured(
+        "OIDC_REDIRECT_URI or BACKEND_BASE_URL is required for OIDC in production"
+      );
+    }
+    throw asOidcMisconfigured("Unable to resolve OIDC redirect URI");
+  }
+
   oidcConfigCache = {
     discoveryUrl: parseDiscoveryUrl(process.env.OIDC_DISCOVERY_URL),
     clientId,
     clientSecret,
-    redirectUri: normalizeRedirectUri(process.env.OIDC_REDIRECT_URI),
+    redirectUri: resolvedRedirectUri,
   };
   return oidcConfigCache;
 };
@@ -230,7 +250,7 @@ const getFrontendOidcConfig = () => {
     );
   }
 
-  const fallbackOrigin = prod ? "" : DEFAULT_DEV_FRONTEND_ORIGIN;
+  const fallbackOrigin = prod ? "" : frontendOrigin;
   const primaryOrigin = primaryExplicitOrigin || fallbackOrigin;
   if (!primaryOrigin) {
     throw asOidcMisconfigured("Unable to resolve frontend public origin for OIDC");
@@ -248,7 +268,7 @@ const getFrontendOidcConfig = () => {
     primaryOrigin,
     ...explicit,
     ...corsConfigured,
-    ...(prod ? [] : [DEFAULT_DEV_FRONTEND_ORIGIN]),
+    ...(prod ? [] : [frontendOrigin]),
   ]);
 
   frontendOidcConfigCache = {

@@ -1,6 +1,6 @@
 "use strict";
 
-const DEFAULT_DEV_APP_BASE_URL = "http://localhost:5173";
+const { frontendOrigin } = require("../config/appOrigin");
 const FRONTEND_BASE_URL_KEYS = [
   "APP_PUBLIC_URL",
   "OIDC_APP_BASE_URL",
@@ -58,7 +58,7 @@ const resolveAppPublicBaseUrl = () => {
     if (normalized) return normalized;
   }
 
-  if (!isProductionEnv()) return DEFAULT_DEV_APP_BASE_URL;
+  if (!isProductionEnv()) return frontendOrigin;
   return "";
 };
 
@@ -83,4 +83,3 @@ module.exports = {
   normalizeAppRelativePath,
   buildPublicAppUrl,
 };
-
