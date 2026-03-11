@@ -1,13 +1,14 @@
 const express = require("express");
-const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
-const { UPLOADS_DIR } = require("../core/config/paths");
+const { getStorageProvider } = require("../storage");
+const { finalizeUploadedMedia } = require("../storage/mediaUploadLifecycle");
+const { createMediaAsset } = require("../services/mediaAssets.service");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 
 const router = express.Router();
-const UPLOAD_DIR = path.join(UPLOADS_DIR, "media-assets");
+const storageProvider = getStorageProvider();
 
 const parseContentDisposition = (line) => {
   const nameMatch = line.match(/name="([^"]+)"/i);
@@ -148,12 +149,14 @@ const saveUploadedFile = async (file) => {
     throw new Error('File content does not match declared type');
   }
 
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   const ext = sanitizeExt(file.originalname);
   const filename = `${Date.now()}-${randomUUID()}${ext}`;
-  const absolutePath = path.join(UPLOAD_DIR, filename);
-  await fs.promises.writeFile(absolutePath, file.buffer);
-  return `/uploads/media-assets/${filename}`;
+  const relativePath = path.posix.join("media-assets", filename);
+  const saved = await storageProvider.saveFile({
+    relativePath,
+    buffer: file.buffer,
+  });
+  return finalizeUploadedMedia({ saved, file, relativePath });
 };
 
 router.post("/", async (req, res) => {
@@ -168,15 +171,16 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "validation_error", field: "file" });
     }
 
-    const relativeUrl = await saveUploadedFile(upload);
-    const publicUrl = toAbsolutePublicUrl(relativeUrl);
+    const storageResult = await saveUploadedFile(upload);
+    const publicUrl = toAbsolutePublicUrl(storageResult.publicUrl);
     const id = randomUUID();
 
     const db = getDb();
-    await db("media_assets").insert({
+    await createMediaAsset({
+      trx: db,
       id,
-      public_url: publicUrl,
-      created_at: db.fn.now(),
+      publicUrl,
+      storageMetadata: storageResult,
     });
 
     return res.status(201).json({ id, publicUrl });

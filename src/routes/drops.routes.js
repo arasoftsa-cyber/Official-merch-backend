@@ -1,11 +1,12 @@
 const express = require("express");
-const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { requirePolicy } = require("../core/http/policy.middleware");
-const { ensureUploadDir } = require("../core/config/uploadPaths");
+const { getStorageProvider } = require("../storage");
+const { finalizeUploadedMedia } = require("../storage/mediaUploadLifecycle");
+const { createMediaAsset } = require("../services/mediaAssets.service");
 const {
   isUserLinkedToArtist,
   isLabelLinkedToArtist,
@@ -35,6 +36,7 @@ const DROP_HERO_EXT_BY_MIME = {
   "image/png": ".png",
   "image/webp": ".webp",
 };
+const storageProvider = getStorageProvider();
 
 const isArtistDropsScope = (req) => req.baseUrl?.includes("/artist/drops");
 const isAdminDropsScope = (req) => req.baseUrl?.includes("/admin/drops");
@@ -163,10 +165,13 @@ const parseMultipartFormData = async (req) => {
 const saveDropHeroImage = async (file) => {
   const ext = DROP_HERO_EXT_BY_MIME[file.mimetype] || "";
   const filename = `${Date.now()}-${randomUUID()}${ext}`;
-  const destination = ensureUploadDir("media-assets", "drops");
-  const absolutePath = path.join(destination, filename);
-  await fs.promises.writeFile(absolutePath, file.buffer);
-  return `/uploads/media-assets/drops/${filename}`;
+  const relativePath = path.posix.join("media-assets", "drops", filename);
+  const saved = await storageProvider.saveFile({
+    relativePath,
+    buffer: file.buffer,
+  });
+  const storageResult = await finalizeUploadedMedia({ saved, file, relativePath });
+  return storageResult.publicUrl;
 };
 
 const loadCoverUrlMap = async (entityType, entityIds) => {
@@ -240,10 +245,10 @@ const upsertDropHeroMedia = async (trx, dropId, heroUrl) => {
     mediaAssetId = existingAsset.id;
   } else {
     mediaAssetId = randomUUID();
-    await trx("media_assets").insert({
+    await createMediaAsset({
+      trx,
       id: mediaAssetId,
-      public_url: normalizedHeroUrl,
-      created_at: trx.fn.now(),
+      publicUrl: normalizedHeroUrl,
     });
   }
 

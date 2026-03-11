@@ -1,18 +1,18 @@
-const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../../core/db/db");
 const { hasTableCached } = require("../../core/db/schemaCache");
-const { ensureUploadDir } = require("../../core/config/uploadPaths");
+const { getStorageProvider } = require("../../storage");
+const { finalizeUploadedMedia } = require("../../storage/mediaUploadLifecycle");
+const { createMediaAsset } = require("../mediaAssets.service");
 const { toAbsolutePublicUrl } = require("../../utils/publicUrl");
-const { PRODUCT_UPLOAD_DIR } = require("./constants");
+const storageProvider = getStorageProvider();
 
 const saveProductListingPhotos = async ({ trx, productId, files = [] }) => {
   return saveProductMediaFiles({ trx, productId, files, role: "listing_photo" });
 };
 
 const saveProductMediaFiles = async ({ trx, productId, files = [], role = "listing_photo" }) => {
-  ensureUploadDir("products");
   const urls = [];
 
   for (let index = 0; index < files.length; index += 1) {
@@ -20,15 +20,19 @@ const saveProductMediaFiles = async ({ trx, productId, files = [], role = "listi
     const extRaw = path.extname(file.originalname || "").slice(0, 12);
     const ext = /^[.][a-z0-9]+$/i.test(extRaw) ? extRaw.toLowerCase() : "";
     const filename = `${Date.now()}-${randomUUID()}${ext}`;
-    const absolutePath = path.join(PRODUCT_UPLOAD_DIR, filename);
-    await fs.promises.writeFile(absolutePath, file.buffer);
-
-    const publicUrl = `/uploads/products/${filename}`;
+    const relativePath = path.posix.join("products", filename);
+    const saved = await storageProvider.saveFile({
+      relativePath,
+      buffer: file.buffer,
+    });
+    const storageResult = await finalizeUploadedMedia({ saved, file, relativePath });
+    const publicUrl = storageResult.publicUrl;
     const mediaAssetId = randomUUID();
-    await trx("media_assets").insert({
+    await createMediaAsset({
+      trx,
       id: mediaAssetId,
-      public_url: publicUrl,
-      created_at: trx.fn.now(),
+      publicUrl,
+      storageMetadata: storageResult,
     });
 
     await trx("entity_media_links").insert({
@@ -177,4 +181,3 @@ module.exports = {
   loadProductDesignImagesMap,
   attachListingPhotosToProducts,
 };
-

@@ -1,4 +1,3 @@
-const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const {
@@ -9,7 +8,8 @@ const {
   deleteHomepageBannerLink,
 } = require("../services/homepage.service");
 const { DEFAULT_HOMEPAGE_BANNER_SORT_ORDER } = require("../common/constants");
-const { UPLOADS_DIR } = require("../core/config/paths");
+const { getStorageProvider } = require("../storage");
+const { finalizeUploadedMedia } = require("../storage/mediaUploadLifecycle");
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -17,16 +17,12 @@ const MAX_PUBLIC_URL_LENGTH = 2048;
 const MAX_MULTIPART_BYTES = 6 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-const HOMEPAGE_BANNERS_UPLOAD_DIR = path.join(
-  UPLOADS_DIR,
-  "media-assets",
-  "homepage-banners"
-);
 const MIME_EXT_BY_TYPE = {
   "image/jpeg": ".jpg",
   "image/png": ".png",
   "image/webp": ".webp",
 };
+const storageProvider = getStorageProvider();
 
 const isUuid = (value) => typeof value === "string" && UUID_RE.test(value);
 
@@ -146,12 +142,15 @@ const parseMultipartFormData = async (req) => {
 };
 
 const saveHomepageBannerImage = async (file) => {
-  fs.mkdirSync(HOMEPAGE_BANNERS_UPLOAD_DIR, { recursive: true });
   const ext = MIME_EXT_BY_TYPE[file.mimetype] || "";
   const filename = `${Date.now()}-${randomUUID()}${ext}`;
-  const absolutePath = path.join(HOMEPAGE_BANNERS_UPLOAD_DIR, filename);
-  await fs.promises.writeFile(absolutePath, file.buffer);
-  return `/uploads/media-assets/homepage-banners/${filename}`;
+  const relativePath = path.posix.join("media-assets", "homepage-banners", filename);
+  const saved = await storageProvider.saveFile({
+    relativePath,
+    buffer: file.buffer,
+  });
+  const storageResult = await finalizeUploadedMedia({ saved, file, relativePath });
+  return storageResult.publicUrl;
 };
 
 const getHomepageBanners = async (req, res, next) => {
