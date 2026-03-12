@@ -28,6 +28,27 @@ describe("OIDC Google auth flow", () => {
       accessToken: "oidc-access-token",
       refreshToken: "oidc-refresh-token",
     });
+    oidcService.prepareGoogleOidcStart.mockResolvedValue({
+      authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?mock=1",
+    });
+    oidcService.buildFrontendSuccessRedirect.mockImplementation(
+      ({ appOrigin, appCallbackPath, portal, returnTo, exchangeCode }) =>
+        `${appOrigin}${appCallbackPath}?portal=${encodeURIComponent(
+          portal
+        )}&returnTo=${encodeURIComponent(returnTo)}&code=${encodeURIComponent(exchangeCode)}`
+    );
+    oidcService.buildFrontendFailureRedirect.mockImplementation(
+      ({ appOrigin, portal, returnTo, errorCode, message }) =>
+        `${appOrigin}/${portal}/login?error=${encodeURIComponent(
+          errorCode
+        )}&message=${encodeURIComponent(message)}&portal=${encodeURIComponent(
+          portal
+        )}&returnTo=${encodeURIComponent(returnTo)}`
+    );
+    oidcService.consumeExchangeCodeDetailed.mockImplementation(() => ({
+      ok: false,
+      reason: "invalid_or_expired",
+    }));
     oidcService.issueExchangeCode.mockReturnValue("exchange-code-123");
     oidcService.toSafeReturnTo.mockImplementation((value, portal) => {
       if (value && String(value).startsWith("/")) return value;
@@ -74,6 +95,24 @@ describe("OIDC Google auth flow", () => {
     expect(authService.issueAuthTokensForUser).toHaveBeenCalled();
   });
 
+  it("OIDC start accepts valid canonical parameters and redirects to Google", async () => {
+    const response = await request(app).get(
+      "/api/auth/oidc/google/start?portal=fan&returnTo=%2Ffan%2Forders&appOrigin=http%3A%2F%2Flocalhost%3A5173"
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toContain("accounts.google.com");
+    expect(oidcService.prepareGoogleOidcStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({
+          portal: "fan",
+          returnTo: "/fan/orders",
+          appOrigin: "http://localhost:5173",
+        }),
+      })
+    );
+  });
+
   it("fan OIDC login reuses an existing fan account", async () => {
     mockCallbackPayload();
     mockQueryBuilder.first.mockResolvedValueOnce({
@@ -117,7 +156,10 @@ describe("OIDC Google auth flow", () => {
 
     expect(response.status).toBe(302);
     expect(response.headers.location).toContain("/fan/login");
-    expect(response.headers.location).toContain("portalError=partner_account");
+    expect(response.headers.location).toContain(
+      "error=auth_portal_mismatch_fan_to_partner"
+    );
+    expect(response.headers.location).not.toContain("portalError=");
     expect(oidcService.issueExchangeCode).not.toHaveBeenCalled();
   });
 
@@ -164,7 +206,8 @@ describe("OIDC Google auth flow", () => {
 
     expect(response.status).toBe(302);
     expect(response.headers.location).toContain("/partner/login");
-    expect(response.headers.location).toContain("portalError=partner_unknown_account");
+    expect(response.headers.location).toContain("error=auth_partner_account_not_found");
+    expect(response.headers.location).not.toContain("portalError=");
   });
 
   it("partner OIDC login rejects unapproved partner account", async () => {
@@ -185,7 +228,8 @@ describe("OIDC Google auth flow", () => {
 
     expect(response.status).toBe(302);
     expect(response.headers.location).toContain("/partner/login");
-    expect(response.headers.location).toContain("portalError=partner_not_approved");
+    expect(response.headers.location).toContain("error=auth_partner_account_unapproved");
+    expect(response.headers.location).not.toContain("portalError=");
   });
 
   it("OIDC exchange rejects missing code and invalid codes", async () => {
@@ -193,12 +237,79 @@ describe("OIDC Google auth flow", () => {
       .post("/api/auth/oidc/google/exchange")
       .send({});
     expect(missingCode.status).toBe(400);
+    expect(missingCode.body.error).toBe("oidc_exchange_failed");
 
-    oidcService.consumeExchangeCode.mockReturnValueOnce(null);
+    oidcService.consumeExchangeCodeDetailed.mockReturnValueOnce({
+      ok: false,
+      reason: "invalid_or_expired",
+    });
     const invalidCode = await request(app)
       .post("/api/auth/oidc/google/exchange")
       .send({ code: "invalid-code" });
     expect(invalidCode.status).toBe(401);
-    expect(invalidCode.body.error).toBe("invalid_exchange_code");
+    expect(invalidCode.body.error).toBe("oidc_exchange_failed");
+  });
+
+  it("OIDC exchange returns duplicate callback code contract", async () => {
+    oidcService.consumeExchangeCodeDetailed.mockReturnValueOnce({
+      ok: false,
+      reason: "duplicate",
+    });
+
+    const duplicateCode = await request(app)
+      .post("/api/auth/oidc/google/exchange")
+      .send({ code: "used-code" });
+
+    expect(duplicateCode.status).toBe(409);
+    expect(duplicateCode.body.error).toBe("oidc_callback_replay_or_duplicate");
+    expect(duplicateCode.body.message).toMatch(/already been consumed/i);
+  });
+
+  it("OIDC start returns explicit contract failures for invalid inputs", async () => {
+    oidcService.prepareGoogleOidcStart.mockRejectedValueOnce({
+      code: "invalid_portal",
+      message: "portal must be fan or partner.",
+    });
+    const invalidPortal = await request(app).get("/api/auth/oidc/google/start?portal=bad");
+    expect(invalidPortal.status).toBe(400);
+    expect(invalidPortal.body.error).toBe("invalid_portal");
+
+    oidcService.prepareGoogleOidcStart.mockRejectedValueOnce({
+      code: "invalid_origin",
+      message: "OIDC appOrigin must be an allowed frontend origin.",
+    });
+    const invalidOrigin = await request(app).get(
+      "/api/auth/oidc/google/start?portal=fan&appOrigin=https://evil.example"
+    );
+    expect(invalidOrigin.status).toBe(400);
+    expect(invalidOrigin.body.error).toBe("invalid_origin");
+
+    oidcService.prepareGoogleOidcStart.mockRejectedValueOnce({
+      code: "invalid_return_to",
+      message: "returnTo must be a safe internal path starting with '/'.",
+    });
+    const invalidReturnTo = await request(app).get(
+      "/api/auth/oidc/google/start?portal=fan&returnTo=https://evil.example"
+    );
+    expect(invalidReturnTo.status).toBe(400);
+    expect(invalidReturnTo.body.error).toBe("invalid_return_to");
+  });
+
+  it("OIDC callback invalid state maps to stable failure redirect shape", async () => {
+    oidcService.consumeGoogleCallback.mockRejectedValueOnce({
+      code: "invalid_state",
+      message: "Invalid or expired OIDC state.",
+    });
+    oidcService.parseSignedState.mockImplementationOnce(() => {
+      throw new Error("bad state");
+    });
+    oidcService.buildFrontendFailureRedirect.mockReturnValueOnce(
+      "http://localhost:5173/fan/login?error=invalid_state&message=Invalid%20or%20expired%20OIDC%20state.&portal=fan&returnTo=%2Ffan"
+    );
+
+    const response = await request(app).get("/api/auth/oidc/google/callback?state=invalid");
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toContain("error=invalid_state");
+    expect(response.headers.location).toContain("portal=fan");
   });
 });

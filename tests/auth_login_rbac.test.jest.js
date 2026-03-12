@@ -94,8 +94,11 @@ describe("auth login and RBAC", () => {
     const partnerLoginRes = await request(app)
       .post("/api/auth/partner/login")
       .send(credentialsFor(buyerUser));
-    expect(partnerLoginRes.status).toBe(401);
-    expect(partnerLoginRes.body.error).toBe("fan_account");
+    expect(partnerLoginRes.status).toBe(403);
+    expect(partnerLoginRes.body).toEqual({
+      error: "auth_portal_mismatch_partner_to_fan",
+      message: "This account belongs to the Fan Portal. Use fan login.",
+    });
   });
 
   it("label login succeeds for general portal", async () => {
@@ -128,8 +131,35 @@ describe("auth login and RBAC", () => {
       .post("/api/auth/partner/login")
       .send(credentialsFor(labelUser));
 
+    expect(partnerLoginRes.status).toBe(403);
+    expect(partnerLoginRes.body.error).toBe("auth_partner_account_unapproved");
+    expect(partnerLoginRes.body.message).toBe("Partner account is not approved yet.");
+  });
+
+  it("fan login rejects partner/admin account with portal-mismatch contract", async () => {
+    mockQueryBuilder.first.mockResolvedValue(adminUser);
+
+    const fanLoginRes = await request(app)
+      .post("/api/auth/fan/login")
+      .send(credentialsFor(adminUser));
+
+    expect(fanLoginRes.status).toBe(403);
+    expect(fanLoginRes.body).toEqual({
+      error: "auth_portal_mismatch_fan_to_partner",
+      message: "This account belongs to the Partner Portal. Use partner login.",
+    });
+  });
+
+  it("partner invalid credentials remains unauthorized and distinct from forbidden portal mismatch", async () => {
+    mockQueryBuilder.first.mockResolvedValue(null);
+
+    const partnerLoginRes = await request(app)
+      .post("/api/auth/partner/login")
+      .send(credentialsFor(buyerUser));
+
     expect(partnerLoginRes.status).toBe(401);
     expect(partnerLoginRes.body.error).toBe("invalid_credentials");
+    expect(partnerLoginRes.body.message).toBe("Invalid email or password");
   });
 
   it("artist login succeeds for standard and partner portals when artist mapping exists", async () => {

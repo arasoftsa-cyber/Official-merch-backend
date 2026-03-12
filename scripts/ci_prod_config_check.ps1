@@ -2,6 +2,13 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $backendDir = Resolve-Path "$scriptDir\.."
 Set-Location $backendDir
 
+Write-Host "Running backend production env contract preflight..."
+npm.cmd run env:check:prod
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Backend production env contract preflight failed."
+  exit 1
+}
+
 Write-Host "Running backend production-config contract tests..."
 npm.cmd run test:backend:prod-config
 if ($LASTEXITCODE -ne 0) {

@@ -6,7 +6,20 @@ const { hasTableCached } = require("../core/db/schemaCache");
 const { signAccessToken, signRefreshToken, verifyRefreshToken } = require("../utils/jwt");
 
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MISSING_REFRESH_TOKEN_CODE = "MISSING_REFRESH_TOKEN";
+const EXPIRED_REFRESH_TOKEN_CODE = "EXPIRED_REFRESH_TOKEN";
+const REVOKED_REFRESH_TOKEN_CODE = "REVOKED_REFRESH_TOKEN";
+const INVALID_REFRESH_SESSION_CODE = "INVALID_REFRESH_SESSION";
 const INVALID_REFRESH_TOKEN_CODE = "INVALID_REFRESH_TOKEN";
+
+const REFRESH_OUTCOME = Object.freeze({
+  success: "success",
+  missing: "missing",
+  invalid: "invalid",
+  expired: "expired",
+  revokedOrReused: "revoked_or_reused",
+  sessionInvalid: "session_invalid",
+});
 
 const hashToken = (token) =>
   createHash("sha256").update(String(token || "")).digest("hex");
@@ -51,54 +64,173 @@ const issueAuthTokensForUser = async ({ user, trx }) => {
   return { accessToken, refreshToken };
 };
 
-const asInvalidRefreshError = () => {
-  const err = new Error("invalid_refresh_token");
-  err.code = INVALID_REFRESH_TOKEN_CODE;
-  return err;
+const mapVerifyRefreshError = (err) => {
+  if (err?.name === "TokenExpiredError") return EXPIRED_REFRESH_TOKEN_CODE;
+  return INVALID_REFRESH_TOKEN_CODE;
 };
 
-const rotateRefreshToken = async ({ refreshToken }) => {
-  let decoded;
-  try {
-    decoded = verifyRefreshToken(refreshToken);
-  } catch (_err) {
-    throw asInvalidRefreshError();
+const extractBearerToken = (authorizationHeader) => {
+  const match = String(authorizationHeader || "").match(/^Bearer\s+(.+)$/i);
+  return match ? match[1] : "";
+};
+
+const resolveIncomingRefreshToken = (req = {}) => {
+  const bodyToken = String(req?.body?.refreshToken || "").trim();
+  if (bodyToken) return bodyToken;
+
+  const headerToken = extractBearerToken(req?.headers?.authorization || req?.headers?.Authorization);
+  if (headerToken) return String(headerToken).trim();
+
+  const cookieToken = String(req?.cookies?.refreshToken || "").trim();
+  if (cookieToken) return cookieToken;
+
+  return "";
+};
+
+const normalizeRefreshFailure = (code) => {
+  if (code === MISSING_REFRESH_TOKEN_CODE) {
+    return {
+      ok: false,
+      outcome: REFRESH_OUTCOME.missing,
+      code: "missing_refresh_token",
+      message: "missing_refresh_token",
+      status: 401,
+      clearSession: true,
+    };
+  }
+  if (code === EXPIRED_REFRESH_TOKEN_CODE) {
+    return {
+      ok: false,
+      outcome: REFRESH_OUTCOME.expired,
+      code: "expired_refresh_token",
+      message: "Refresh token has expired",
+      status: 401,
+      clearSession: true,
+    };
+  }
+  if (code === REVOKED_REFRESH_TOKEN_CODE) {
+    return {
+      ok: false,
+      outcome: REFRESH_OUTCOME.revokedOrReused,
+      code: "revoked_refresh_token",
+      message: "Refresh token has been revoked or already used",
+      status: 401,
+      clearSession: true,
+    };
+  }
+  if (code === INVALID_REFRESH_SESSION_CODE) {
+    return {
+      ok: false,
+      outcome: REFRESH_OUTCOME.sessionInvalid,
+      code: "invalid_refresh_session",
+      message: "Refresh session is no longer valid",
+      status: 401,
+      clearSession: true,
+    };
+  }
+  return {
+    ok: false,
+    outcome: REFRESH_OUTCOME.invalid,
+    code: "invalid_refresh_token",
+    message: "Invalid refresh token",
+    status: 401,
+    clearSession: true,
+  };
+};
+
+const buildRefreshSuccessResult = ({ accessToken, refreshToken, user }) => ({
+  ok: true,
+  outcome: REFRESH_OUTCOME.success,
+  status: 200,
+  payload: {
+    accessToken,
+    refreshToken,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    },
+  },
+});
+
+const refreshSession = async ({ refreshToken }) => {
+  const token = String(refreshToken || "").trim();
+  if (!token) {
+    return normalizeRefreshFailure(MISSING_REFRESH_TOKEN_CODE);
   }
 
-  const userId = decoded?.sub || decoded?.user_id || decoded?.id || null;
-  if (!userId) throw asInvalidRefreshError();
+  let decoded;
+  try {
+    decoded = verifyRefreshToken(token);
+  } catch (err) {
+    return normalizeRefreshFailure(mapVerifyRefreshError(err));
+  }
 
-  const tokenHash = hashToken(refreshToken);
+  const userId = String(decoded?.sub || decoded?.user_id || decoded?.id || "").trim();
+  if (!userId) {
+    return normalizeRefreshFailure(INVALID_REFRESH_TOKEN_CODE);
+  }
+
+  const tokenHash = hashToken(token);
   const db = getDb();
 
-  return db.transaction(async (trx) => {
-    const existing = await trx("auth_refresh_tokens")
-      .where({
-        user_id: userId,
-        token_hash: tokenHash,
-      })
-      .whereNull("revoked_at")
-      .andWhere("expires_at", ">", trx.fn.now())
-      .forUpdate()
-      .first();
+  try {
+    return await db.transaction(async (trx) => {
+      const tokenRow = await trx("auth_refresh_tokens")
+        .where({
+          user_id: userId,
+          token_hash: tokenHash,
+        })
+        .forUpdate()
+        .first();
 
-    if (!existing) {
-      throw asInvalidRefreshError();
-    }
+      if (!tokenRow) {
+        return normalizeRefreshFailure(INVALID_REFRESH_TOKEN_CODE);
+      }
 
-    await trx("auth_refresh_tokens")
-      .where({ token_hash: tokenHash })
-      .whereNull("revoked_at")
-      .update({ revoked_at: trx.fn.now() });
+      if (tokenRow.revoked_at) {
+        await revokeAllRefreshTokensForUser({ userId, trx }).catch(() => 0);
+        return normalizeRefreshFailure(REVOKED_REFRESH_TOKEN_CODE);
+      }
 
-    const user = await findUserById(trx, userId);
-    if (!user) {
-      throw asInvalidRefreshError();
-    }
+      if (tokenRow.expires_at && new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+        await trx("auth_refresh_tokens")
+          .where({ token_hash: tokenHash })
+          .whereNull("revoked_at")
+          .update({ revoked_at: trx.fn.now() });
+        return normalizeRefreshFailure(EXPIRED_REFRESH_TOKEN_CODE);
+      }
 
-    const tokens = await issueAuthTokensForUser({ user, trx });
-    return { ...tokens, user };
-  });
+      const revoked = await trx("auth_refresh_tokens")
+        .where({ token_hash: tokenHash })
+        .whereNull("revoked_at")
+        .update({ revoked_at: trx.fn.now() });
+      if (Number(revoked) < 1) {
+        await revokeAllRefreshTokensForUser({ userId, trx }).catch(() => 0);
+        return normalizeRefreshFailure(REVOKED_REFRESH_TOKEN_CODE);
+      }
+
+      const user = await findUserById(trx, userId);
+      if (!user?.id) {
+        await revokeAllRefreshTokensForUser({ userId, trx }).catch(() => 0);
+        return normalizeRefreshFailure(INVALID_REFRESH_SESSION_CODE);
+      }
+
+      const tokens = await issueAuthTokensForUser({ user, trx });
+      return buildRefreshSuccessResult({
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        user,
+      });
+    });
+  } catch (err) {
+    throw err;
+  }
+};
+
+const refreshSessionFromRequest = async ({ req }) => {
+  const refreshToken = resolveIncomingRefreshToken(req);
+  return refreshSession({ refreshToken });
 };
 
 const revokeRefreshToken = async ({ refreshToken }) => {
@@ -129,9 +261,9 @@ const revokeAllRefreshTokensForUser = async ({ userId, trx } = {}) => {
 };
 
 module.exports = {
-  INVALID_REFRESH_TOKEN_CODE,
   issueAuthTokensForUser,
-  rotateRefreshToken,
+  refreshSession,
+  refreshSessionFromRequest,
   revokeRefreshToken,
   revokeAllRefreshTokensForUser,
 };
