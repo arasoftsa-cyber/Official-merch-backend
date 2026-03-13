@@ -17,9 +17,7 @@ jest.mock("../src/core/db/schemaCache.js", () => ({
   hasColumnCached: jest.fn().mockResolvedValue(true),
 }));
 jest.mock("../src/services/auth.service.js", () => ({
-  INVALID_REFRESH_TOKEN_CODE: "INVALID_REFRESH_TOKEN",
   issueAuthTokensForUser: jest.fn(),
-  rotateRefreshToken: jest.fn(),
   revokeRefreshToken: jest.fn(),
   revokeAllRefreshTokensForUser: jest.fn().mockResolvedValue(1),
 }));
