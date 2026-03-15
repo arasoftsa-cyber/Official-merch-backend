@@ -1,5 +1,9 @@
 const buckets = new Map();
 const { recordFlag } = require("../../utils/abuseFlags");
+const {
+  getProcessLocalTrustBoundaryControl,
+} = require("../runtime/trustBoundarySupport");
+const RATE_LIMIT_CONTROL = getProcessLocalTrustBoundaryControl("rate_limits");
 
 const NODE_ENV = String(process.env.NODE_ENV || "").toLowerCase();
 const RATE_LIMIT_DISABLED = process.env.DISABLE_RATE_LIMIT === "1";
@@ -55,3 +59,4 @@ const rateLimit = ({ windowMs = 60_000, max = 10, keyGenerator = (req) => req.ip
 };
 
 module.exports = rateLimit;
+module.exports.RATE_LIMIT_CONTROL = RATE_LIMIT_CONTROL;

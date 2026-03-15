@@ -114,7 +114,7 @@ describe("smoke critical path", () => {
       .send({
         artistName: "Smoke Artist",
         handle: "smoke-artist",
-        pitch: "Smoke pitch",
+        aboutMe: "Smoke pitch",
         socials: [],
         phone: "5555555555",
         requested_plan_type: "basic",

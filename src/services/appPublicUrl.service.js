@@ -1,18 +1,9 @@
 "use strict";
 
-const { frontendOrigin } = require("../config/appOrigin");
-const FRONTEND_BASE_URL_KEYS = [
-  "APP_PUBLIC_URL",
-  "OIDC_APP_BASE_URL",
-  "UI_BASE_URL",
-  "FRONTEND_URL",
-  "CLIENT_URL",
-  "PUBLIC_URL",
-  "APP_URL",
-];
+const { createRuntimeEnv } = require("../config/runtimeEnv");
 
-const isProductionEnv = () =>
-  String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+const getRuntime = () => createRuntimeEnv(process.env);
+const isProductionEnv = () => Boolean(getRuntime().flags?.isProduction);
 
 const normalizeBaseUrl = (rawValue) => {
   const value = String(rawValue || "").trim();
@@ -52,15 +43,8 @@ const normalizeAppRelativePath = (rawValue, fallbackValue = "/") => {
   return value.replace(/\/+$/, "");
 };
 
-const resolveAppPublicBaseUrl = () => {
-  for (const key of FRONTEND_BASE_URL_KEYS) {
-    const normalized = normalizeBaseUrl(process.env[key]);
-    if (normalized) return normalized;
-  }
-
-  if (!isProductionEnv()) return frontendOrigin;
-  return "";
-};
+const resolveAppPublicBaseUrl = () =>
+  normalizeBaseUrl(getRuntime().origins.oidcAppBaseUrl || "");
 
 const buildPublicAppUrl = ({ path = "/", query = {} } = {}) => {
   const appBaseUrl = resolveAppPublicBaseUrl();
@@ -78,7 +62,6 @@ const buildPublicAppUrl = ({ path = "/", query = {} } = {}) => {
 };
 
 module.exports = {
-  FRONTEND_BASE_URL_KEYS,
   resolveAppPublicBaseUrl,
   normalizeAppRelativePath,
   buildPublicAppUrl,

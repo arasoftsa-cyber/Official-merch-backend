@@ -1,6 +1,10 @@
 const failedAttempts = new Map();
+const {
+  getProcessLocalTrustBoundaryControl,
+} = require("../runtime/trustBoundarySupport");
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+const ACCOUNT_LOCKOUT_CONTROL = getProcessLocalTrustBoundaryControl("account_lockout");
 
 const isLockedOut = (key) => {
   if (!key) return false;
@@ -55,6 +59,7 @@ const clearFailedAttempts = (key) => {
 };
 
 module.exports = {
+  ACCOUNT_LOCKOUT_CONTROL,
   failedAttempts,
   LOCKOUT_THRESHOLD,
   LOCKOUT_DURATION_MS,

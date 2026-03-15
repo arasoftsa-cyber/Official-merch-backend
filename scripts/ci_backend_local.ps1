@@ -2,26 +2,27 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $backendDir = Resolve-Path "$scriptDir\.."
 Set-Location $backendDir
 
-Write-Host "Running backend migrations..."
+Write-Host "Running backend authoritative CI lane..."
+Write-Host "Stage: backend migrations"
 npx knex migrate:latest
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "Database migrations failed."
+  Write-Error "Backend authoritative CI lane failed during migrations."
   exit 1
 }
 
-Write-Host "Seeding UI smoke data..."
+Write-Host "Stage: backend smoke seed"
 node -r dotenv/config scripts/seed_ui_smoke.js
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "UI smoke seed failed."
+  Write-Error "Backend authoritative CI lane failed during smoke seed."
   exit 1
 }
 
-Write-Host "Running backend Jest test suite..."
+Write-Host "Stage: backend Jest test suite"
 npm.cmd run test:backend:local
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "Backend Jest test suite failed."
+  Write-Error "Backend authoritative CI lane failed during Jest tests."
   exit 1
 }
 
-Write-Host "Backend local checks passed."
+Write-Host "Backend authoritative CI lane passed."
 exit 0

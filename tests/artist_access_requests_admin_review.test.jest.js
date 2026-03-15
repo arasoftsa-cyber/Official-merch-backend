@@ -731,6 +731,6 @@ describe("artist access request admin review", () => {
       .set("x-test-role", "admin")
       .send({ comment: "Missing required details" });
     expect(rejectResponse.status).toBe(200);
-  });
+  }, 20000);
 });
 

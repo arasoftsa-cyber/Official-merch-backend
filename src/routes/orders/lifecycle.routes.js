@@ -15,6 +15,10 @@ const registerOrderLifecycleRoutes = (router, deps) => {
     sendOrderStatusUpdateEmailBestEffort,
     startPaymentForOrder,
     ORDER_NOT_PAYABLE,
+    getSystemCurrency,
+    assertSupportedCurrency,
+    CURRENCY_MISMATCH,
+    normalizeOrderPaymentPayload,
   } = deps;
 
 router.post("/:id/cancel", requireAuth, async (req, res, next) => {
@@ -135,10 +139,35 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
 router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req, res, next) => {
   try {
     if (!rejectIfNotBuyer(req, res)) return;
+    let currency;
+    try {
+      const normalized = normalizeOrderPaymentPayload(req.body || {});
+      currency = assertSupportedCurrency(normalized.dto.currency, {
+        allowDefaultOnEmpty: true,
+      });
+    } catch (currencyErr) {
+      if (currencyErr?.code === "CURRENCY_MISMATCH") {
+        return fail(
+          res,
+          400,
+          CURRENCY_MISMATCH,
+          "Currency does not match the configured system currency.",
+          currencyErr.details
+        );
+      }
+      throw currencyErr;
+    }
+    if (!req.body?.currency) {
+      console.info("[orders.currency]", {
+        event: "currency_autoinjected",
+        currency: currency || getSystemCurrency(),
+      });
+    }
     const result = await startPaymentForOrder({
       knex: getDb(),
       orderId: req.params.id,
       buyerUserId: req.user.id,
+      currency,
     });
     const paymentId = result.paymentId;
     const confirmPath = paymentId
@@ -158,6 +187,15 @@ router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req,
     }
     if (error.code === "ORDER_NOT_PAYABLE") {
       return fail(res, 400, ORDER_NOT_PAYABLE, "Order is not payable");
+    }
+    if (error.code === "CURRENCY_MISMATCH") {
+      return fail(
+        res,
+        400,
+        CURRENCY_MISMATCH,
+        "Currency does not match the configured system currency.",
+        error.details
+      );
     }
     next(error);
   }

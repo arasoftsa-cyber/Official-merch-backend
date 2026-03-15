@@ -1,6 +1,7 @@
 "use strict";
 
 const { randomUUID } = require("crypto");
+const { getTableColumns } = require("../core/db/schemaCache");
 const { normalizeUploadStatus } = require("../storage/uploadStatus");
 
 const buildMediaAssetInsertPayload = async ({
@@ -10,34 +11,35 @@ const buildMediaAssetInsertPayload = async ({
   storageMetadata = {},
 } = {}) => {
   if (!trx) throw new Error("media_asset_transaction_required");
+  const mediaAssetColumns = await getTableColumns(trx, "media_assets");
+  if (!mediaAssetColumns || !Object.prototype.hasOwnProperty.call(mediaAssetColumns, "public_url")) {
+    throw new Error("media_assets_table_not_ready");
+  }
 
-  const columns = await trx("media_assets").columnInfo();
-  const hasColumn = (name) => Object.prototype.hasOwnProperty.call(columns, name);
   const payload = {
     id,
     public_url: publicUrl,
   };
-
-  if (hasColumn("created_at")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "created_at")) {
     payload.created_at = trx.fn.now();
   }
-  if (hasColumn("status")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "status")) {
     payload.status = normalizeUploadStatus(storageMetadata.status);
   }
-  if (hasColumn("storage_key")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "storage_key")) {
     payload.storage_key = storageMetadata.storageKey || null;
   }
-  if (hasColumn("provider")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "provider")) {
     payload.provider = storageMetadata.provider || null;
   }
-  if (hasColumn("mime_type")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "mime_type")) {
     payload.mime_type = storageMetadata.mimeType || null;
   }
-  if (hasColumn("size_bytes")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "size_bytes")) {
     payload.size_bytes =
       typeof storageMetadata.size === "number" ? storageMetadata.size : null;
   }
-  if (hasColumn("original_filename")) {
+  if (Object.prototype.hasOwnProperty.call(mediaAssetColumns, "original_filename")) {
     payload.original_filename = storageMetadata.originalFilename || null;
   }
 

@@ -1,4 +1,4 @@
-const MAX_MULTIPART_BYTES = 15 * 1024 * 1024;
+const DEFAULT_MAX_MULTIPART_BYTES = 15 * 1024 * 1024;
 
 const parseContentDisposition = (line) => {
   const nameMatch = line.match(/name="([^"]+)"/i);
@@ -24,7 +24,11 @@ const splitBufferBy = (buffer, delimiter) => {
   return chunks;
 };
 
-const parseMultipartFormData = async (req) => {
+const parseMultipartFormData = async (req, options = {}) => {
+  const maxBytes =
+    Number.isFinite(options.maxBytes) && options.maxBytes > 0
+      ? Number(options.maxBytes)
+      : DEFAULT_MAX_MULTIPART_BYTES;
   const contentType = String(req.headers["content-type"] || "");
   if (!contentType.toLowerCase().includes("multipart/form-data")) return null;
 
@@ -37,7 +41,7 @@ const parseMultipartFormData = async (req) => {
     let total = 0;
     req.on("data", (chunk) => {
       total += chunk.length;
-      if (total > MAX_MULTIPART_BYTES) {
+      if (total > maxBytes) {
         reject(new Error("payload_too_large"));
         req.destroy();
         return;
@@ -49,6 +53,11 @@ const parseMultipartFormData = async (req) => {
   }).catch((error) => ({ parseError: error.message }));
 
   if (body?.parseError) return { fields: {}, filesByField: {}, parseError: body.parseError };
+
+  const closingDelimiter = Buffer.from(`--${boundary}--`);
+  if (body.indexOf(closingDelimiter) === -1) {
+    return { fields: {}, filesByField: {}, parseError: "malformed_multipart" };
+  }
 
   const delimiter = Buffer.from(`--${boundary}`);
   const rawParts = splitBufferBy(body, delimiter);
@@ -64,7 +73,9 @@ const parseMultipartFormData = async (req) => {
     if (part.subarray(0, 2).toString() === "--") continue;
 
     const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
-    if (headerEnd < 0) continue;
+    if (headerEnd < 0) {
+      return { fields: {}, filesByField: {}, parseError: "malformed_multipart" };
+    }
 
     const headerText = part.subarray(0, headerEnd).toString("utf8");
     let content = part.subarray(headerEnd + 4);

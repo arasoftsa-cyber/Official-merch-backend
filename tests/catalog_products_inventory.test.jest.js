@@ -876,7 +876,7 @@ describe("catalog products and inventory", () => {
     expect(normalized.error).toBe("invalid_our_share_cents");
   });
 
-  it("variant normalization keeps legacy update payloads compatible", () => {
+  it("variant normalization rejects removed price aliases", () => {
     const { normalizeVariant } = require(PRODUCT_VARIANTS_ROUTE_MODULE_PATH).__test;
     const normalized = normalizeVariant({
       id: "00000000-0000-4000-8000-000000000001",
@@ -885,8 +885,7 @@ describe("catalog products and inventory", () => {
     });
 
     expect(normalized.error).toBe(undefined);
-    expect(normalized.value.inventory_sku_id).toBe(undefined);
-    expect(normalized.value.selling_price_cents).toBe(2100);
+    expect(normalized.value.selling_price_cents).toBe(undefined);
     expect(normalized.value.stock).toBe(12);
   });
 
@@ -1117,7 +1116,7 @@ describe("catalog runtime api contracts", () => {
           {
             id: firstVariant.id,
             inventory_sku_id: firstVariant.inventory_sku_id || firstVariant.inventorySkuId,
-            priceCents: 2699,
+            sellingPriceCents: 2699,
             stock: 5,
             size: "M",
             color: "Black",

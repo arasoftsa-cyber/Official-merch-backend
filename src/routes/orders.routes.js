@@ -1,12 +1,22 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
-const { z } = require("zod");
 const { getDb } = require("../core/db/db");
+const { assertOrderItemSnapshotSchema } = require("../core/db/schemaContract");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { ok, fail } = require("../core/http/errorResponse");
 const rateLimit = require("../core/http/rateLimit");
 const { orderSpamGuard } = require("../core/http/spamDetection");
 const { startPaymentForOrder } = require("../core/payments/paymentService");
+const {
+  getSystemCurrency,
+  assertSupportedCurrency,
+} = require("../config/currency");
+const {
+  normalizeCreateOrderPayload,
+  validateCreateOrderPayload,
+  normalizeOrderPaymentPayload,
+} = require("../contracts/orders.contract");
+const { logLegacyContractUse } = require("../contracts/shared");
 const { sendEmailByTemplate } = require("../services/email.service");
 const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
 const {
@@ -28,38 +38,7 @@ const ORDER_NOT_PAYABLE = "order_not_payable";
 const VALIDATION_ERROR = "validation_error";
 const ORDER_ALREADY_CANCELLED = "order_already_cancelled";
 const ORDER_NOT_CANCELLABLE = "order_not_cancellable";
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const orderLineSchema = z.object({
-  productId: z.string().trim().regex(UUID_RE, "productId must be a valid UUID"),
-  productVariantId: z
-    .string()
-    .trim()
-    .regex(UUID_RE, "productVariantId must be a valid UUID"),
-  quantity: z.coerce
-    .number()
-    .int("quantity must be an integer")
-    .min(1, "quantity must be at least 1")
-    .max(10, "quantity must be at most 10"),
-});
-const orderItemsSchema = z
-  .array(orderLineSchema)
-  .min(1, "items must contain at least one item")
-  .max(50, "items cannot exceed 50 items");
-
-const parseOrderItems = (body) => {
-  if (Array.isArray(body?.items)) {
-    return orderItemsSchema.parse(body.items);
-  }
-
-  return orderItemsSchema.parse([
-    {
-      productId: body?.productId,
-      productVariantId: body?.productVariantId,
-      quantity: body?.quantity,
-    },
-  ]);
-};
+const CURRENCY_MISMATCH = "currency_mismatch";
 
 const asNullableNumber = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -133,46 +112,26 @@ const isVariantEffectivelySellable = (variant) => {
   return productActive && variantListed && skuActive && stock > 0;
 };
 
-const getOrderItemColumns = async (trx) => trx("order_items").columnInfo();
-
-const buildOrderItemInsertPayload = ({
-  columns = {},
-  orderId,
-  line,
-  variant,
-  now,
-}) => {
-  const hasColumn = (name) => Object.prototype.hasOwnProperty.call(columns, name);
-  const payload = {
+const buildOrderItemInsertPayload = ({ orderId, line, variant, now }) => ({
     id: randomUUID(),
     order_id: orderId,
     product_id: line.productId,
     product_variant_id: line.productVariantId,
     quantity: line.quantity,
     price_cents: variant.selling_price_cents,
+    inventory_sku_id: variant.inventory_sku_id || null,
+    supplier_sku: variant.supplier_sku || null,
+    merch_type: variant.merch_type || null,
+    quality_tier: variant.quality_tier || null,
+    size: variant.size || null,
+    color: variant.color || null,
+    selling_price_cents: variant.selling_price_cents,
+    vendor_payout_cents:
+      variant.vendor_payout_cents == null ? null : Number(variant.vendor_payout_cents),
+    royalty_cents: variant.royalty_cents == null ? null : Number(variant.royalty_cents),
+    our_share_cents: variant.our_share_cents == null ? null : Number(variant.our_share_cents),
     created_at: now,
-  };
-
-  if (hasColumn("inventory_sku_id")) payload.inventory_sku_id = variant.inventory_sku_id || null;
-  if (hasColumn("supplier_sku")) payload.supplier_sku = variant.supplier_sku || null;
-  if (hasColumn("merch_type")) payload.merch_type = variant.merch_type || null;
-  if (hasColumn("quality_tier")) payload.quality_tier = variant.quality_tier || null;
-  if (hasColumn("size")) payload.size = variant.size || null;
-  if (hasColumn("color")) payload.color = variant.color || null;
-  if (hasColumn("selling_price_cents")) payload.selling_price_cents = variant.selling_price_cents;
-  if (hasColumn("vendor_payout_cents")) {
-    payload.vendor_payout_cents =
-      variant.vendor_payout_cents == null ? null : Number(variant.vendor_payout_cents);
-  }
-  if (hasColumn("royalty_cents")) {
-    payload.royalty_cents = variant.royalty_cents == null ? null : Number(variant.royalty_cents);
-  }
-  if (hasColumn("our_share_cents")) {
-    payload.our_share_cents =
-      variant.our_share_cents == null ? null : Number(variant.our_share_cents);
-  }
-  return payload;
-};
+  });
 
 const fetchVariantForCheckout = async (trx, line) =>
   trx("product_variants as pv")
@@ -274,6 +233,7 @@ const formatOrder = (row) => {
     buyerUserId: row.buyer_user_id,
     status: row.status,
     totalCents: row.total_cents,
+    currency: getSystemCurrency(),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -344,7 +304,7 @@ const sendOrderConfirmationEmailBestEffort = async ({ db, user, order, items }) 
       payload: {
         orderId: order.id,
         totalCents: order.total_cents,
-        currency: "INR",
+        currency: getSystemCurrency(),
         itemCount: Array.isArray(items) ? items.length : null,
         orderUrl,
       },
@@ -482,6 +442,7 @@ const listOrdersHandler = async (req, res, next) => {
         id: order.id,
         status: order.status,
         totalCents: order.totalCents ?? order.total_cents ?? null,
+        currency: getSystemCurrency(),
         createdAt: order.created_at,
         itemsCount: countMap[order.id] || 0,
         payment:
@@ -524,6 +485,10 @@ registerOrderLifecycleRoutes(router, {
   sendOrderStatusUpdateEmailBestEffort,
   startPaymentForOrder,
   ORDER_NOT_PAYABLE,
+  getSystemCurrency,
+  assertSupportedCurrency,
+  CURRENCY_MISMATCH,
+  normalizeOrderPaymentPayload,
 });
 
 registerOrderCreateRoutes(router, {
@@ -536,11 +501,9 @@ registerOrderCreateRoutes(router, {
   fail,
   FORBIDDEN,
   rejectIfNotBuyer,
-  parseOrderItems,
-  z,
   VALIDATION_ERROR,
   getDb,
-  getOrderItemColumns,
+  assertOrderItemSnapshotSchema,
   reserveInventoryForLine,
   randomUUID,
   buildOrderItemInsertPayload,
@@ -550,6 +513,13 @@ registerOrderCreateRoutes(router, {
   sendOrderConfirmationEmailBestEffort,
   PRODUCT_NOT_FOUND,
   OUT_OF_STOCK,
+  getSystemCurrency,
+  assertSupportedCurrency,
+  CURRENCY_MISMATCH,
+  normalizeCreateOrderPayload,
+  validateCreateOrderPayload,
+  normalizeOrderPaymentPayload,
+  logLegacyContractUse,
 });
 
 module.exports = router;

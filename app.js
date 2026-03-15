@@ -15,12 +15,19 @@ const {
   backendBaseUrl,
   getOriginConfigReadiness,
 } = require("./src/config/appOrigin");
+const {
+  createRuntimeEnv,
+  assertValidRuntimeEnv,
+  applyRuntimeEnvCompatibility,
+  emitRuntimeEnvWarnings,
+} = require("./src/config/runtimeEnv");
 const createHealthRouter = require("./src/routes/health.routes");
 const router = require("./src/routes/index");
 const app = express();
-const PORT = process.env.PORT || 3000;
-const BODY_SIZE_LIMIT = process.env.BODY_SIZE_LIMIT || "2mb";
-const isProduction = process.env.NODE_ENV === "production";
+const runtimeEnv = createRuntimeEnv(process.env);
+const PORT = runtimeEnv.env.port || 3000;
+const BODY_SIZE_LIMIT = runtimeEnv.env.bodySizeLimit || "2mb";
+const isProduction = runtimeEnv.flags.isProduction;
 const STORAGE_PROVIDER_LOCAL = "local";
 const STORAGE_PROVIDER_OBJECT = "object";
 const DEBUG_STARTUP = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG_STARTUP || "").trim());
@@ -32,7 +39,7 @@ const logStartupDebug = (...args) => {
 const isTruthyEnv = (value) => /^(1|true|yes|on)$/i.test(String(value || "").trim());
 const normalizeStorageProvider = (value) =>
   String(value || STORAGE_PROVIDER_LOCAL).trim().toLowerCase();
-const configuredStorageProvider = normalizeStorageProvider(process.env.STORAGE_PROVIDER);
+const configuredStorageProvider = normalizeStorageProvider(runtimeEnv.env.storageProvider);
 const enableLegacyUploadsStatic = isTruthyEnv(process.env.ENABLE_LEGACY_UPLOADS_STATIC);
 const shouldServeUploadsFromApp =
   configuredStorageProvider !== STORAGE_PROVIDER_OBJECT || enableLegacyUploadsStatic;
@@ -73,7 +80,14 @@ app.use(helmet({
     preload: true
   } : false,
 }));
-app.use(express.json({ limit: BODY_SIZE_LIMIT }));
+app.use(express.json({
+  limit: BODY_SIZE_LIMIT,
+  verify: (req, _res, buf) => {
+    if (req.originalUrl?.startsWith("/api/payments/webhook/")) {
+      req.rawBody = Buffer.from(buf);
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
 
 app.use((req, res, next) => {
@@ -218,40 +232,6 @@ const seedArtistAccessRequestsIfEmpty = async () => {
   }
 };
 
-const ensureRequiredAuthSecrets = () => {
-  if (process.env.NODE_ENV === "test") return;
-
-  const requiredSecrets = ["JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET"];
-  const missingSecrets = requiredSecrets.filter(
-    (envKey) => !String(process.env[envKey] || "").trim()
-  );
-
-  if (missingSecrets.length === 0) return;
-
-  const readableList = missingSecrets.map((envKey) => `- ${envKey}`).join("\n");
-  console.error(`Missing required auth secrets:\n${readableList}`);
-  throw new Error(
-    `Missing required auth secrets: ${missingSecrets.join(", ")}`
-  );
-};
-
-const ensureRefreshSecretSeparation = () => {
-  if (process.env.NODE_ENV === "test") return;
-
-  const refreshSecret = String(process.env.JWT_REFRESH_SECRET || "").trim();
-  const accessSecret = String(
-    process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || ""
-  ).trim();
-
-  if (!refreshSecret || !accessSecret) return;
-  if (refreshSecret !== accessSecret) return;
-
-  const message =
-    "JWT_REFRESH_SECRET must be different from the access/token signing secret";
-  console.error(`[startup] ${message}`);
-  throw new Error(message);
-};
-
 const ensureSeededUserRoles = async () => {
   if (process.env.NODE_ENV !== "development") return;
   try {
@@ -277,24 +257,18 @@ const ensureSeededUserRoles = async () => {
 };
 
 const startServer = async () => {
-  ensureRequiredAuthSecrets();
-  ensureRefreshSecretSeparation();
+  const validatedRuntimeEnv = assertValidRuntimeEnv(runtimeEnv);
+  applyRuntimeEnvCompatibility(validatedRuntimeEnv);
+  emitRuntimeEnvWarnings(validatedRuntimeEnv);
 
   const originReadiness =
     typeof getOriginConfigReadiness === "function"
       ? getOriginConfigReadiness()
       : { ready: false, missing: ["origin_config_unavailable"] };
   if (originReadiness.ready === false) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error(
-        `[startup] missing required origin config: ${originReadiness.missing.join(", ")}`
-      );
-    }
-    console.warn("[startup] origin config incomplete", {
-      missing: originReadiness.missing,
-      frontendOrigin: originReadiness.frontendOrigin || null,
-      backendBaseUrl: originReadiness.backendBaseUrl || null,
-    });
+    throw new Error(
+      `[startup] missing required origin config: ${originReadiness.missing.join(", ")}`
+    );
   }
 
   const emailReadiness = getEmailConfigReadiness();
@@ -304,18 +278,40 @@ const startServer = async () => {
       : { loadedFiles: [] };
   console.log("[startup] email config readiness", {
     configured: emailReadiness.configured,
+    ready: emailReadiness.ready,
+    required: emailReadiness.required,
+    blocking: emailReadiness.blocking,
+    status: emailReadiness.status,
     apiKeyPresent: emailReadiness.apiKeyPresent,
     fromEmailPresent: emailReadiness.fromEmailPresent,
     fromNamePresent: emailReadiness.fromNamePresent,
     envFiles: envDiagnostics.loadedFiles,
+    nodeEnv: validatedRuntimeEnv.flags.nodeEnv,
+    isProduction: validatedRuntimeEnv.flags.isProduction,
+    frontendOrigin: validatedRuntimeEnv.origins.frontendOrigin,
+    backendBaseUrl: validatedRuntimeEnv.origins.backendBaseUrl,
+    oidcAppBaseUrl: validatedRuntimeEnv.origins.oidcAppBaseUrl || null,
+    oidcEnabled: validatedRuntimeEnv.env.oidcEnabled,
+    oidcRedirectUriConfigured: Boolean(validatedRuntimeEnv.env.oidcRedirectUri),
+    storageProvider: configuredStorageProvider,
+    instanceMode: validatedRuntimeEnv.env.instanceMode,
+    trustBoundarySharedStateReady: validatedRuntimeEnv.trustBoundary.sharedStateReady,
+    trustBoundaryControls: validatedRuntimeEnv.trustBoundary.controls.map((control) => control.id),
+    configWarnings: validatedRuntimeEnv.warnings,
     originReady: originReadiness.ready,
     originMissing: originReadiness.missing,
   });
   if (!emailReadiness.configured) {
-    console.warn("[startup] transactional email disabled (missing env)", {
-      missingRequired: emailReadiness.missingRequired,
-      missingOptional: emailReadiness.missingOptional,
-    });
+    const logMethod = emailReadiness.required ? "error" : "warn";
+    console[logMethod](
+      emailReadiness.required
+        ? "[startup] transactional email is required but not configured"
+        : "[startup] transactional email remains optional and is not configured",
+      {
+        missingRequired: emailReadiness.missingRequired,
+        missingOptional: emailReadiness.missingOptional,
+      }
+    );
   }
 
   await ensureSeededUserRoles();

@@ -1,12 +1,20 @@
 const { isLabelLinkedToArtist, isUserLinkedToArtist } = require("../../utils/ownership");
 
+const ADMIN_DROP_ACTIONS = new Set([
+  "drop:create",
+  "drop:add-product",
+  "drop:publish",
+  "drop:unpublish",
+  "drop:archive",
+]);
+
 const dropCan = async (user, action, resource, ctx) => {
   if (!user) return false;
   const db = ctx?.db;
   const userId = ctx?.userId;
 
   if (user.role === "admin") {
-    return true;
+    return resource === "self" && ADMIN_DROP_ACTIONS.has(action);
   }
 
   if (action === "drop:create" && resource === "self") {

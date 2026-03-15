@@ -1,6 +1,10 @@
 const recentOrders = new Map();
+const {
+  getProcessLocalTrustBoundaryControl,
+} = require("../runtime/trustBoundarySupport");
 const ORDER_WINDOW_MS = 60_000;
 const ORDER_MAX_PER_WINDOW = 3;
+const ORDER_SPAM_GUARD_CONTROL = getProcessLocalTrustBoundaryControl("order_spam_guard");
 
 const isEnabledFlag = (value) => {
   const normalized = String(value || "").toLowerCase();
@@ -52,4 +56,4 @@ const orderSpamGuard = (req, res, next) => {
   next();
 };
 
-module.exports = { orderSpamGuard };
+module.exports = { orderSpamGuard, ORDER_SPAM_GUARD_CONTROL };

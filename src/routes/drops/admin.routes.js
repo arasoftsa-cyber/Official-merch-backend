@@ -1,5 +1,6 @@
 const registerDropsAdminRoutes = (router, deps) => {
   const {
+    requirePolicy,
     requireAuth,
     rejectLabelMutations,
     isAdminDropsScope,
@@ -9,9 +10,7 @@ const registerDropsAdminRoutes = (router, deps) => {
     getDb,
     buildSellableMinPriceSubquery,
     applySellableVariantExists,
-    parseMultipartFormData,
-    MAX_DROP_HERO_IMAGE_BYTES,
-    ALLOWED_DROP_HERO_MIME_TYPES,
+    parseDropHeroUpload,
     saveDropHeroImage,
     upsertDropHeroMedia,
     loadCoverUrlMap,
@@ -19,231 +18,191 @@ const registerDropsAdminRoutes = (router, deps) => {
     normalizeHandle,
   } = deps;
 
-router.get("/:id/products", async (req, res, next) => {
-  try {
+  const routeAdminDropsScope = (req, _res, next) => {
     if (!isAdminDropsScope(req)) {
-      return next();
+      return next("route");
     }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
+    return next();
+  };
 
-    const dropId = String(req.params?.id || "").trim();
-    if (!isUuid(dropId)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
+  const requireAdminDropsRead = requirePolicy("admin_dashboard:read", "drops");
+  const requireAdminDropsWrite = requirePolicy("admin_dashboard:write", "drops");
 
-    const db = getDb();
-    const drop = await db("drops").select("id").where({ id: dropId }).first();
-    if (!drop) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    const productsQuery = db("drop_products as dp")
-      .join("products as p", "p.id", "dp.product_id")
-      .select(
-        "p.id",
-        "p.title",
-        "p.artist_id",
-        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
-      )
-      .where("dp.drop_id", dropId)
-      .groupBy("p.id", "p.title", "p.artist_id")
-      .orderBy("p.title", "asc");
-    applySellableVariantExists(productsQuery, { productRef: "p.id" });
-    const rows = await productsQuery;
-
-    const productIds = rows.map((row) => row.id);
-    return res.json({
-      drop_id: dropId,
-      product_ids: productIds,
-      products: rows.map((row) => ({
-        id: row.id,
-        title: row.title,
-        artist_id: row.artist_id,
-        price_cents: row.price_cents == null ? null : Number(row.price_cents),
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.put("/:id/products", requireAuth, async (req, res, next) => {
-  try {
-    if (!isAdminDropsScope(req)) {
-      return next();
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const dropId = String(req.params?.id || "").trim();
-    if (!isUuid(dropId)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const body = req.body || {};
-    const productIdsRaw = body.product_ids;
-    if (!Array.isArray(productIdsRaw)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const normalizedProductIds = Array.from(
-      new Set(
-        productIdsRaw
-          .map((value) => String(value || "").trim())
-          .filter((value) => value.length > 0)
-      )
-    );
-
-    if (normalizedProductIds.some((id) => !isUuid(id))) {
-      return res.status(400).json({ error: "invalid_product_ids" });
-    }
-
-    const db = getDb();
-    const drop = await db("drops").select("id").where({ id: dropId }).first();
-    if (!drop) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    if (normalizedProductIds.length > 0) {
-      const existingProducts = await db("products")
-        .select("id")
-        .whereIn("id", normalizedProductIds);
-      const existingProductIds = new Set(existingProducts.map((row) => row.id));
-      const missing = normalizedProductIds.filter((id) => !existingProductIds.has(id));
-      if (missing.length > 0) {
-        return res.status(400).json({ error: "invalid_product_ids", missing });
+  router.get("/:id/products", routeAdminDropsScope, requireAuth, requireAdminDropsRead, async (req, res, next) => {
+    try {
+      const dropId = String(req.params?.id || "").trim();
+      if (!isUuid(dropId)) {
+        return res.status(400).json(BAD_REQUEST);
       }
-    }
 
-    await db.transaction(async (trx) => {
-      await trx("drop_products").where({ drop_id: dropId }).del();
+      const db = getDb();
+      const drop = await db("drops").select("id").where({ id: dropId }).first();
+      if (!drop) {
+        return res.status(404).json(NOT_FOUND);
+      }
+
+      const productsQuery = db("drop_products as dp")
+        .join("products as p", "p.id", "dp.product_id")
+        .select(
+          "p.id",
+          "p.title",
+          "p.artist_id",
+          buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
+        )
+        .where("dp.drop_id", dropId)
+        .groupBy("p.id", "p.title", "p.artist_id")
+        .orderBy("p.title", "asc");
+      applySellableVariantExists(productsQuery, { productRef: "p.id" });
+      const rows = await productsQuery;
+
+      const productIds = rows.map((row) => row.id);
+      return res.json({
+        drop_id: dropId,
+        product_ids: productIds,
+        products: rows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          artist_id: row.artist_id,
+          price_cents: row.price_cents == null ? null : Number(row.price_cents),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/:id/products", routeAdminDropsScope, requireAuth, requireAdminDropsWrite, async (req, res, next) => {
+    try {
+      const dropId = String(req.params?.id || "").trim();
+      if (!isUuid(dropId)) {
+        return res.status(400).json(BAD_REQUEST);
+      }
+
+      const body = req.body || {};
+      const productIdsRaw = body.product_ids;
+      if (!Array.isArray(productIdsRaw)) {
+        return res.status(400).json(BAD_REQUEST);
+      }
+
+      const normalizedProductIds = Array.from(
+        new Set(
+          productIdsRaw
+            .map((value) => String(value || "").trim())
+            .filter((value) => value.length > 0)
+        )
+      );
+
+      if (normalizedProductIds.some((id) => !isUuid(id))) {
+        return res.status(400).json({ error: "invalid_product_ids" });
+      }
+
+      const db = getDb();
+      const drop = await db("drops").select("id").where({ id: dropId }).first();
+      if (!drop) {
+        return res.status(404).json(NOT_FOUND);
+      }
+
       if (normalizedProductIds.length > 0) {
-        const now = trx.fn.now();
-        const rows = normalizedProductIds.map((productId, index) => ({
-          drop_id: dropId,
-          product_id: productId,
-          sort_order: index,
-          created_at: now,
-        }));
-        await trx("drop_products").insert(rows);
+        const existingProducts = await db("products")
+          .select("id")
+          .whereIn("id", normalizedProductIds);
+        const existingProductIds = new Set(existingProducts.map((row) => row.id));
+        const missing = normalizedProductIds.filter((id) => !existingProductIds.has(id));
+        if (missing.length > 0) {
+          return res.status(400).json({ error: "invalid_product_ids", missing });
+        }
       }
-      await trx("drops").where({ id: dropId }).update({ updated_at: trx.fn.now() });
-    });
 
-    const updatedProductsQuery = db("drop_products as dp")
-      .join("products as p", "p.id", "dp.product_id")
-      .select(
-        "p.id",
-        "p.title",
-        "p.artist_id",
-        buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
-      )
-      .where("dp.drop_id", dropId)
-      .groupBy("p.id", "p.title", "p.artist_id")
-      .orderBy("p.title", "asc");
-    applySellableVariantExists(updatedProductsQuery, { productRef: "p.id" });
-    const updatedRows = await updatedProductsQuery;
+      await db.transaction(async (trx) => {
+        await trx("drop_products").where({ drop_id: dropId }).del();
+        if (normalizedProductIds.length > 0) {
+          const now = trx.fn.now();
+          const rows = normalizedProductIds.map((productId, index) => ({
+            drop_id: dropId,
+            product_id: productId,
+            sort_order: index,
+            created_at: now,
+          }));
+          await trx("drop_products").insert(rows);
+        }
+        await trx("drops").where({ id: dropId }).update({ updated_at: trx.fn.now() });
+      });
 
-    const updatedProductIds = updatedRows.map((row) => row.id);
-    return res.json({
-      drop_id: dropId,
-      product_ids: updatedProductIds,
-      products: updatedRows.map((row) => ({
-        id: row.id,
-        title: row.title,
-        artist_id: row.artist_id,
-        price_cents: row.price_cents == null ? null : Number(row.price_cents),
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
+      const updatedProductsQuery = db("drop_products as dp")
+        .join("products as p", "p.id", "dp.product_id")
+        .select(
+          "p.id",
+          "p.title",
+          "p.artist_id",
+          buildSellableMinPriceSubquery(db, { productRef: "p.id" }).wrap("(", ") as price_cents")
+        )
+        .where("dp.drop_id", dropId)
+        .groupBy("p.id", "p.title", "p.artist_id")
+        .orderBy("p.title", "asc");
+      applySellableVariantExists(updatedProductsQuery, { productRef: "p.id" });
+      const updatedRows = await updatedProductsQuery;
 
-router.post("/:id/hero-image", requireAuth, rejectLabelMutations, async (req, res, next) => {
+      const updatedProductIds = updatedRows.map((row) => row.id);
+      return res.json({
+        drop_id: dropId,
+        product_ids: updatedProductIds,
+        products: updatedRows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          artist_id: row.artist_id,
+          price_cents: row.price_cents == null ? null : Number(row.price_cents),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/:id/hero-image",
+    routeAdminDropsScope,
+    requireAuth,
+    rejectLabelMutations,
+    requireAdminDropsWrite,
+    parseDropHeroUpload,
+    async (req, res, next) => {
+      try {
+        const dropId = String(req.params?.id || "").trim();
+        if (!isUuid(dropId)) {
+          return res.status(400).json(BAD_REQUEST);
+        }
+
+        const db = getDb();
+        const drop = await db("drops").select("id").where({ id: dropId }).first();
+        if (!drop) {
+          return res.status(404).json(NOT_FOUND);
+        }
+
+        const upload = req.dropHeroUpload.file;
+        const relativeUrl = await saveDropHeroImage(upload);
+
+        await db.transaction(async (trx) => {
+          await upsertDropHeroMedia(trx, dropId, relativeUrl);
+        });
+
+        const coverMap = await loadCoverUrlMap("drop", [dropId]);
+        const updatedDrop = await db("drops").where({ id: dropId }).first();
+        const heroImageUrl = coverMap.get(dropId) || relativeUrl;
+
+        return res.status(201).json({
+          ok: true,
+          public_url: relativeUrl,
+          heroImageUrl,
+          drop: formatDrop(updatedDrop, heroImageUrl),
+        });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+router.patch("/:id", routeAdminDropsScope, requireAuth, rejectLabelMutations, requireAdminDropsWrite, async (req, res, next) => {
   try {
-    if (!isAdminDropsScope(req)) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
-    const dropId = String(req.params?.id || "").trim();
-    if (!isUuid(dropId)) {
-      return res.status(400).json(BAD_REQUEST);
-    }
-
-    const db = getDb();
-    const drop = await db("drops").select("id").where({ id: dropId }).first();
-    if (!drop) {
-      return res.status(404).json(NOT_FOUND);
-    }
-
-    const multipart = await parseMultipartFormData(req);
-    if (!multipart || multipart.parseError) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-
-    const upload = multipart.file;
-    if (!upload || !upload.buffer?.length) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-    if (upload.fieldname !== "file" && upload.fieldname !== "image") {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-    if (upload.buffer.length > MAX_DROP_HERO_IMAGE_BYTES) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-    if (!ALLOWED_DROP_HERO_MIME_TYPES.has(upload.mimetype)) {
-      return res.status(400).json({ error: "validation_error", field: "file" });
-    }
-
-    const relativeUrl = await saveDropHeroImage(upload);
-
-    await db.transaction(async (trx) => {
-      await upsertDropHeroMedia(trx, dropId, relativeUrl);
-    });
-
-    const coverMap = await loadCoverUrlMap("drop", [dropId]);
-    const updatedDrop = await db("drops").where({ id: dropId }).first();
-    const heroImageUrl = coverMap.get(dropId) || relativeUrl;
-
-    return res.status(201).json({
-      ok: true,
-      public_url: relativeUrl,
-      heroImageUrl,
-      drop: formatDrop(updatedDrop, heroImageUrl),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) => {
-  try {
-    if (!isAdminDropsScope(req)) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
     const id = String(req.params?.id || "").trim();
     if (!id) {
       return res.status(400).json(BAD_REQUEST);

@@ -3,6 +3,10 @@
 const { Issuer, generators } = require("openid-client");
 const jwt = require("jsonwebtoken");
 const { randomUUID } = require("crypto");
+const { createRuntimeEnv } = require("../config/runtimeEnv");
+const {
+  getProcessLocalTrustBoundaryControl,
+} = require("../core/runtime/trustBoundarySupport");
 const {
   frontendOrigin,
   backendBaseUrl,
@@ -13,25 +17,56 @@ const DEFAULT_PORTAL_RETURN_TO = Object.freeze({
   fan: "/fan",
   partner: "/partner/dashboard",
 });
+const PORTAL_LOGIN_PATH = Object.freeze({
+  fan: "/fan/login",
+  partner: "/partner/login",
+});
 const ALLOWED_PORTALS = new Set(["fan", "partner"]);
 const STATE_TTL_SECONDS = 10 * 60;
 const EXCHANGE_CODE_TTL_MS = 60 * 1000;
 const OIDC_CALLBACK_PATH = "/api/auth/oidc/google/callback";
 const DEFAULT_APP_CALLBACK_PATH = "/auth/oidc/callback";
-const FRONTEND_ORIGIN_ENV_KEYS = [
-  "OIDC_APP_BASE_URL",
-  "APP_PUBLIC_URL",
-  "UI_BASE_URL",
-  "FRONTEND_URL",
-  "CLIENT_URL",
-  "PUBLIC_URL",
-  "APP_URL",
-];
+const OIDC_STATE_VERSION = 1;
 
 let oidcClientPromise = null;
 let oidcConfigCache = null;
 let frontendOidcConfigCache = null;
 const exchangeCodeStore = new Map();
+const consumedExchangeCodeStore = new Map();
+const OIDC_EXCHANGE_CODE_CONTROL = getProcessLocalTrustBoundaryControl("oidc_exchange_codes");
+
+const OIDC_CONTRACT_ERRORS = Object.freeze({
+  INVALID_ORIGIN: {
+    status: 400,
+    code: "invalid_origin",
+    message: "OIDC appOrigin must be an allowed frontend origin.",
+  },
+  INVALID_PORTAL: {
+    status: 400,
+    code: "invalid_portal",
+    message: "portal must be fan or partner.",
+  },
+  INVALID_RETURN_TO: {
+    status: 400,
+    code: "invalid_return_to",
+    message: "returnTo must be a safe internal path starting with '/'.",
+  },
+  INVALID_STATE: {
+    status: 400,
+    code: "invalid_state",
+    message: "Invalid or expired OIDC state.",
+  },
+  OIDC_EXCHANGE_FAILED: {
+    status: 401,
+    code: "oidc_exchange_failed",
+    message: "Failed to finalize OIDC exchange.",
+  },
+  OIDC_CALLBACK_REPLAY_OR_DUPLICATE: {
+    status: 409,
+    code: "oidc_callback_replay_or_duplicate",
+    message: "OIDC callback code has already been consumed.",
+  },
+});
 
 const isOidcEnabled = () => {
   const raw = String(process.env.OIDC_ENABLED || "").trim().toLowerCase();
@@ -50,6 +85,17 @@ const getStateSecret = () => {
 const asOidcMisconfigured = (message) => {
   const err = new Error(message);
   err.code = "OIDC_MISCONFIGURED";
+  return err;
+};
+
+const asOidcContractError = (contractError, extra) => {
+  const selected = contractError || OIDC_CONTRACT_ERRORS.OIDC_EXCHANGE_FAILED;
+  const err = new Error(selected.message);
+  err.code = selected.code;
+  err.status = selected.status;
+  if (extra && typeof extra === "object") {
+    err.details = extra;
+  }
   return err;
 };
 
@@ -220,12 +266,10 @@ const normalizeAppCallbackPath = (rawValue, label) => {
 };
 
 const getConfiguredFrontendOrigins = () => {
-  const explicit = [];
-  for (const envKey of FRONTEND_ORIGIN_ENV_KEYS) {
-    const raw = String(process.env[envKey] || "").trim();
-    if (!raw) continue;
-    explicit.push(normalizeConfiguredOrigin(raw, envKey));
-  }
+  const runtimeEnv = createRuntimeEnv(process.env);
+  const explicit = runtimeEnv.origins.oidcAppBaseUrl
+    ? [normalizeConfiguredOrigin(runtimeEnv.origins.oidcAppBaseUrl, "OIDC_APP_BASE_URL")]
+    : [];
 
   const corsConfigured = splitConfiguredOrigins(process.env.CORS_ORIGINS).map((value, index) =>
     normalizeConfiguredOrigin(value, `CORS_ORIGINS[${index}]`)
@@ -245,9 +289,7 @@ const getFrontendOidcConfig = () => {
   const primaryExplicitOrigin = explicit[0] || "";
 
   if (prod && !primaryExplicitOrigin) {
-    throw asOidcMisconfigured(
-      "OIDC_APP_BASE_URL (or APP_PUBLIC_URL/UI_BASE_URL/FRONTEND_URL/CLIENT_URL) is required in production"
-    );
+    throw asOidcMisconfigured("OIDC_APP_BASE_URL is required in production");
   }
 
   const fallbackOrigin = prod ? "" : frontendOrigin;
@@ -275,7 +317,7 @@ const getFrontendOidcConfig = () => {
     primaryOrigin,
     allowedOrigins,
     appCallbackPath: normalizeAppCallbackPath(
-      process.env.OIDC_APP_CALLBACK_PATH || process.env.OIDC_FRONTEND_CALLBACK_PATH,
+      createRuntimeEnv(process.env).env.oidcAppCallbackPath || DEFAULT_APP_CALLBACK_PATH,
       "OIDC_APP_CALLBACK_PATH"
     ),
   };
@@ -300,20 +342,46 @@ const normalizePortal = (value, fallback = "fan") => {
   return fallback;
 };
 
+const validatePortal = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!ALLOWED_PORTALS.has(normalized)) {
+    throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_PORTAL);
+  }
+  return normalized;
+};
+
+const decodeMaybe = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch (_err) {
+    return raw;
+  }
+};
+
+const isSafeInternalPath = (value) => {
+  const normalized = String(value || "").trim();
+  return normalized.startsWith("/") && !normalized.startsWith("//");
+};
+
+const validateReturnTo = (value, portal) => {
+  const raw = String(value || "").trim();
+  if (!raw) return DEFAULT_PORTAL_RETURN_TO[normalizePortal(portal)];
+  const decoded = decodeMaybe(raw);
+  if (!isSafeInternalPath(decoded)) {
+    throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_RETURN_TO);
+  }
+  return decoded;
+};
+
 const toSafeReturnTo = (value, portal) => {
   const fallback = DEFAULT_PORTAL_RETURN_TO[normalizePortal(portal)];
-  const raw = String(value || "").trim();
-  if (!raw) return fallback;
-  let decoded = raw;
   try {
-    decoded = decodeURIComponent(raw);
+    return validateReturnTo(value, portal);
   } catch (_err) {
-    decoded = raw;
+    return fallback;
   }
-  if (decoded.startsWith("/") && !decoded.startsWith("//")) {
-    return decoded;
-  }
-  return fallback;
 };
 
 const firstForwardedValue = (value) => String(value || "").split(",")[0].trim();
@@ -345,8 +413,17 @@ const inferOriginFromRequest = (req) => {
 const resolveAppOrigin = (req, requestedAppOrigin) => {
   const frontendConfig = getFrontendOidcConfig();
   const prod = isProductionEnv();
-  const requested = normalizeOriginFromUrl(requestedAppOrigin);
-  if (requested && isAllowedFrontendOrigin(requested)) return requested;
+  const requestedRaw = String(requestedAppOrigin || "").trim();
+  if (requestedRaw) {
+    const requested = normalizeOriginFromUrl(requestedRaw);
+    if (!requested) {
+      throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_ORIGIN);
+    }
+    if (!isAllowedFrontendOrigin(requested)) {
+      throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_ORIGIN);
+    }
+    return requested;
+  }
 
   if (prod) {
     return frontendConfig.primaryOrigin;
@@ -378,9 +455,11 @@ const getOidcClient = async () => {
 
 const buildSignedState = ({ portal, returnTo, appOrigin, nonce }) => {
   const frontendConfig = getFrontendOidcConfig();
+  const resolvedPortal = validatePortal(portal);
   const payload = {
-    portal: normalizePortal(portal),
-    returnTo: toSafeReturnTo(returnTo, portal),
+    v: OIDC_STATE_VERSION,
+    portal: resolvedPortal,
+    returnTo: validateReturnTo(returnTo, resolvedPortal),
     appOrigin: isAllowedFrontendOrigin(appOrigin)
       ? normalizeOriginFromUrl(appOrigin)
       : frontendConfig.primaryOrigin,
@@ -390,28 +469,43 @@ const buildSignedState = ({ portal, returnTo, appOrigin, nonce }) => {
 };
 
 const parseSignedState = (stateToken) => {
-  const frontendConfig = getFrontendOidcConfig();
-  const verified = jwt.verify(String(stateToken || ""), getStateSecret());
-  const portal = normalizePortal(verified?.portal);
-  return {
-    portal,
-    nonce: String(verified?.nonce || ""),
-    returnTo: toSafeReturnTo(verified?.returnTo, portal),
-    appOrigin: isAllowedFrontendOrigin(verified?.appOrigin)
-      ? normalizeOriginFromUrl(verified?.appOrigin)
-      : frontendConfig.primaryOrigin,
-  };
+  try {
+    const verified = jwt.verify(String(stateToken || ""), getStateSecret());
+    const version = Number(verified?.v || 0);
+    if (version !== OIDC_STATE_VERSION) {
+      throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_STATE);
+    }
+
+    const portal = validatePortal(verified?.portal);
+    const appOrigin = normalizeOriginFromUrl(verified?.appOrigin);
+    if (!appOrigin || !isAllowedFrontendOrigin(appOrigin)) {
+      throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_STATE);
+    }
+
+    return {
+      portal,
+      nonce: String(verified?.nonce || ""),
+      returnTo: validateReturnTo(verified?.returnTo, portal),
+      appOrigin,
+    };
+  } catch (err) {
+    if (err?.code === OIDC_CONTRACT_ERRORS.INVALID_STATE.code) {
+      throw err;
+    }
+    throw asOidcContractError(OIDC_CONTRACT_ERRORS.INVALID_STATE);
+  }
 };
 
 const buildGoogleAuthorizationUrl = async ({ req, portal, returnTo, appOrigin }) => {
   const config = getOidcConfig();
   const client = await getOidcClient();
-  const resolvedPortal = normalizePortal(portal);
+  const resolvedPortal = validatePortal(portal);
+  const resolvedReturnTo = validateReturnTo(returnTo, resolvedPortal);
   const nonce = generators.nonce();
   const resolvedAppOrigin = resolveAppOrigin(req, appOrigin);
   const state = buildSignedState({
     portal: resolvedPortal,
-    returnTo,
+    returnTo: resolvedReturnTo,
     appOrigin: resolvedAppOrigin,
     nonce,
   });
@@ -421,43 +515,125 @@ const buildGoogleAuthorizationUrl = async ({ req, portal, returnTo, appOrigin })
     state,
     nonce,
   });
-  return { authorizationUrl };
+  return {
+    authorizationUrl,
+    portal: resolvedPortal,
+    returnTo: resolvedReturnTo,
+    appOrigin: resolvedAppOrigin,
+  };
+};
+
+const prepareGoogleOidcStart = async ({ req, query }) => {
+  const portal = validatePortal(query?.portal);
+  const returnTo = validateReturnTo(query?.returnTo, portal);
+  const appOrigin = String(query?.appOrigin || "").trim();
+  return buildGoogleAuthorizationUrl({
+    req,
+    portal,
+    returnTo,
+    appOrigin,
+  });
+};
+
+const getPortalLoginPath = (portal) => PORTAL_LOGIN_PATH[validatePortal(portal)];
+
+const appendQuery = (baseUrl, query) => {
+  const rawBase = String(baseUrl || "").trim();
+  const isAbsolute = /^https?:\/\//i.test(rawBase);
+  const safeBase = rawBase || "/";
+  const url = isAbsolute
+    ? new URL(safeBase)
+    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, frontendOrigin || "http://example.com");
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    url.searchParams.set(key, String(value));
+  }
+  return isAbsolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+};
+
+const buildFrontendSuccessRedirect = ({
+  appOrigin,
+  appCallbackPath,
+  portal,
+  returnTo,
+  exchangeCode,
+}) => {
+  const resolvedPortal = validatePortal(portal);
+  const resolvedReturnTo = validateReturnTo(returnTo, resolvedPortal);
+  const resolvedAppOrigin = resolveAppOrigin(null, appOrigin);
+  const callbackPath = normalizeAppCallbackPath(appCallbackPath, "OIDC_APP_CALLBACK_PATH");
+  return appendQuery(`${resolvedAppOrigin}${callbackPath}`, {
+    portal: resolvedPortal,
+    returnTo: resolvedReturnTo,
+    code: String(exchangeCode || "").trim(),
+  });
+};
+
+const buildFrontendFailureRedirect = ({
+  appOrigin,
+  portal,
+  returnTo,
+  errorCode,
+  message,
+}) => {
+  const resolvedPortal = validatePortal(portal);
+  const resolvedReturnTo = toSafeReturnTo(returnTo, resolvedPortal);
+  const resolvedAppOrigin = resolveAppOrigin(null, appOrigin);
+  const loginPath = getPortalLoginPath(resolvedPortal);
+  return appendQuery(`${resolvedAppOrigin}${loginPath}`, {
+    error: String(errorCode || "").trim(),
+    message: String(message || "").trim(),
+    portal: resolvedPortal,
+    returnTo: resolvedReturnTo,
+  });
 };
 
 const consumeGoogleCallback = async (req) => {
-  const config = getOidcConfig();
-  const frontendConfig = getFrontendOidcConfig();
-  const client = await getOidcClient();
-  const params = client.callbackParams(req);
-  const parsedState = parseSignedState(params?.state);
-  const tokenSet = await client.callback(config.redirectUri, params, {
-    state: String(params?.state || ""),
-    nonce: parsedState.nonce,
-  });
+  try {
+    const config = getOidcConfig();
+    const frontendConfig = getFrontendOidcConfig();
+    const client = await getOidcClient();
+    const params = client.callbackParams(req);
+    const parsedState = parseSignedState(params?.state);
+    const tokenSet = await client.callback(config.redirectUri, params, {
+      state: String(params?.state || ""),
+      nonce: parsedState.nonce,
+    });
 
-  const claims = typeof tokenSet?.claims === "function" ? tokenSet.claims() : {};
-  let userinfo = null;
-  if ((!claims?.email || !claims?.sub) && tokenSet?.access_token) {
-    userinfo = await client.userinfo(tokenSet.access_token).catch(() => null);
+    const claims = typeof tokenSet?.claims === "function" ? tokenSet.claims() : {};
+    let userinfo = null;
+    if ((!claims?.email || !claims?.sub) && tokenSet?.access_token) {
+      userinfo = await client.userinfo(tokenSet.access_token).catch(() => null);
+    }
+
+    return {
+      portal: parsedState.portal,
+      returnTo: parsedState.returnTo,
+      appOrigin: parsedState.appOrigin,
+      appCallbackPath: frontendConfig.appCallbackPath,
+      email: String(claims?.email || userinfo?.email || "")
+        .trim()
+        .toLowerCase(),
+      sub: String(claims?.sub || userinfo?.sub || "").trim(),
+      avatarUrl: String(claims?.picture || userinfo?.picture || "").trim() || null,
+      emailVerified:
+        typeof claims?.email_verified === "boolean"
+          ? claims.email_verified
+          : typeof userinfo?.email_verified === "boolean"
+            ? userinfo.email_verified
+            : null,
+    };
+  } catch (err) {
+    if (
+      err?.code === OIDC_CONTRACT_ERRORS.INVALID_STATE.code ||
+      err?.code === OIDC_CONTRACT_ERRORS.INVALID_ORIGIN.code ||
+      err?.code === OIDC_CONTRACT_ERRORS.INVALID_PORTAL.code ||
+      err?.code === OIDC_CONTRACT_ERRORS.INVALID_RETURN_TO.code
+    ) {
+      throw err;
+    }
+    throw asOidcContractError(OIDC_CONTRACT_ERRORS.OIDC_EXCHANGE_FAILED);
   }
-
-  return {
-    portal: parsedState.portal,
-    returnTo: parsedState.returnTo,
-    appOrigin: parsedState.appOrigin,
-    appCallbackPath: frontendConfig.appCallbackPath,
-    email: String(claims?.email || userinfo?.email || "")
-      .trim()
-      .toLowerCase(),
-    sub: String(claims?.sub || userinfo?.sub || "").trim(),
-    avatarUrl: String(claims?.picture || userinfo?.picture || "").trim() || null,
-    emailVerified:
-      typeof claims?.email_verified === "boolean"
-        ? claims.email_verified
-        : typeof userinfo?.email_verified === "boolean"
-          ? userinfo.email_verified
-          : null,
-  };
 };
 
 const sweepExchangeCodes = () => {
@@ -467,11 +643,17 @@ const sweepExchangeCodes = () => {
       exchangeCodeStore.delete(code);
     }
   }
+  for (const [code, expiresAt] of consumedExchangeCodeStore.entries()) {
+    if (!expiresAt || expiresAt <= now) {
+      consumedExchangeCodeStore.delete(code);
+    }
+  }
 };
 
 const issueExchangeCode = (authPayload) => {
   sweepExchangeCodes();
   const code = randomUUID();
+  consumedExchangeCodeStore.delete(code);
   exchangeCodeStore.set(code, {
     authPayload,
     expiresAt: Date.now() + EXCHANGE_CODE_TTL_MS,
@@ -479,29 +661,52 @@ const issueExchangeCode = (authPayload) => {
   return code;
 };
 
-const consumeExchangeCode = (code) => {
+const consumeExchangeCodeDetailed = (code) => {
   sweepExchangeCodes();
   const key = String(code || "").trim();
-  if (!key) return null;
+  if (!key) {
+    return { ok: false, reason: "missing" };
+  }
+
+  if (consumedExchangeCodeStore.has(key)) {
+    return { ok: false, reason: "duplicate" };
+  }
 
   const entry = exchangeCodeStore.get(key);
-  if (!entry) return null;
+  if (!entry) {
+    return { ok: false, reason: "invalid_or_expired" };
+  }
   exchangeCodeStore.delete(key);
   if (entry.expiresAt <= Date.now()) {
-    return null;
+    return { ok: false, reason: "invalid_or_expired" };
   }
-  return entry.authPayload || null;
+  consumedExchangeCodeStore.set(key, entry.expiresAt);
+  return { ok: true, payload: entry.authPayload || null };
+};
+
+const consumeExchangeCode = (code) => {
+  const result = consumeExchangeCodeDetailed(code);
+  if (!result.ok) return null;
+  return result.payload;
 };
 
 module.exports = {
+  OIDC_CONTRACT_ERRORS,
   buildGoogleAuthorizationUrl,
+  prepareGoogleOidcStart,
   consumeGoogleCallback,
   issueExchangeCode,
   consumeExchangeCode,
+  consumeExchangeCodeDetailed,
   isOidcEnabled,
   getOidcConfig,
   getFrontendOidcConfig,
   OIDC_CALLBACK_PATH,
   parseSignedState,
   toSafeReturnTo,
+  validatePortal,
+  validateReturnTo,
+  buildFrontendSuccessRedirect,
+  buildFrontendFailureRedirect,
+  OIDC_EXCHANGE_CODE_CONTROL,
 };

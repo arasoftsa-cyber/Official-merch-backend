@@ -21,11 +21,85 @@ const DEFAULT_OIDC_APP_CALLBACK_PATH = "/auth/oidc/callback";
 const PASSWORD_FORGOT_GENERIC_MESSAGE =
   "If an account exists for this email, a password reset link has been sent.";
 const WELCOME_DEFAULT_LOGIN_PATH = "/fan/login";
+const AUTH_ERRORS = {
+  INVALID_ORIGIN: {
+    status: 400,
+    code: "invalid_origin",
+    message: "OIDC appOrigin must be an allowed frontend origin.",
+  },
+  INVALID_PORTAL: {
+    status: 400,
+    code: "invalid_portal",
+    message: "portal must be fan or partner.",
+  },
+  INVALID_RETURN_TO: {
+    status: 400,
+    code: "invalid_return_to",
+    message: "returnTo must be a safe internal path starting with '/'.",
+  },
+  INVALID_STATE: {
+    status: 400,
+    code: "invalid_state",
+    message: "Invalid or expired OIDC state.",
+  },
+  INVALID_CREDENTIALS: {
+    status: 401,
+    code: "invalid_credentials",
+    message: "Invalid email or password",
+  },
+  PORTAL_MISMATCH_FAN_TO_PARTNER: {
+    status: 403,
+    code: "auth_portal_mismatch_fan_to_partner",
+    message: "This account belongs to the Partner Portal. Use partner login.",
+    portal: "partner",
+  },
+  PORTAL_MISMATCH_PARTNER_TO_FAN: {
+    status: 403,
+    code: "auth_portal_mismatch_partner_to_fan",
+    message: "This account belongs to the Fan Portal. Use fan login.",
+    portal: "fan",
+  },
+  PARTNER_ACCOUNT_NOT_FOUND: {
+    status: 403,
+    code: "auth_partner_account_not_found",
+    message: "No approved partner account found for this email.",
+    portal: "partner",
+  },
+  PARTNER_ACCOUNT_UNAPPROVED: {
+    status: 403,
+    code: "auth_partner_account_unapproved",
+    message: "Partner account is not approved yet.",
+    portal: "partner",
+  },
+  OIDC_PROFILE_INCOMPLETE: {
+    status: 400,
+    code: "auth_oidc_profile_incomplete",
+    message: "Google account did not return a usable email profile.",
+  },
+  OIDC_FAILED: {
+    status: 500,
+    code: "auth_oidc_failed",
+    message: "Google login failed. Please try again.",
+  },
+  OIDC_EXCHANGE_FAILED: {
+    status: 401,
+    code: "oidc_exchange_failed",
+    message: "Failed to finalize OIDC exchange.",
+  },
+  OIDC_CALLBACK_REPLAY_OR_DUPLICATE: {
+    status: 409,
+    code: "oidc_callback_replay_or_duplicate",
+    message: "OIDC callback code has already been consumed.",
+  },
+};
 
 const logPartnerLogin = (...args) => {
   if (!authDebugEnabled) return;
   console.log("[auth.partner.login]", ...args);
 };
+
+const failAuthContract = (res, authError, extra) =>
+  fail(res, authError.status, authError.code, authError.message, extra);
 
 const findAuthUserByEmail = async (email) => {
   const normalizedEmail = String(email || "").trim().toLowerCase();
@@ -92,8 +166,6 @@ const buildAuthResponse = async (user) => {
   };
 };
 
-const getPortalLoginPath = (portal) => (portal === "partner" ? "/partner/login" : "/fan/login");
-
 const getOidcFrontendDefaults = () => {
   const fallback = {
     appOrigin: "",
@@ -113,36 +185,37 @@ const getOidcFrontendDefaults = () => {
   }
 };
 
-const appendQuery = (baseUrl, query) => {
-  const rawBase = String(baseUrl || "").trim();
-  const isAbsolute = /^https?:\/\//i.test(rawBase);
-  const safeBase = rawBase || "/";
-  const url = isAbsolute
-    ? new URL(safeBase)
-    : new URL(safeBase.startsWith("/") ? safeBase : `/${safeBase}`, frontendOrigin || "http://example.com");
-  for (const [key, value] of Object.entries(query || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    url.searchParams.set(key, String(value));
+const mapOidcContractErrorToAuthError = (err) => {
+  const code = String(err?.code || "").trim().toLowerCase();
+  if (code === AUTH_ERRORS.INVALID_ORIGIN.code) return AUTH_ERRORS.INVALID_ORIGIN;
+  if (code === AUTH_ERRORS.INVALID_PORTAL.code) return AUTH_ERRORS.INVALID_PORTAL;
+  if (code === AUTH_ERRORS.INVALID_RETURN_TO.code) return AUTH_ERRORS.INVALID_RETURN_TO;
+  if (code === AUTH_ERRORS.INVALID_STATE.code) return AUTH_ERRORS.INVALID_STATE;
+  if (code === AUTH_ERRORS.OIDC_EXCHANGE_FAILED.code) return AUTH_ERRORS.OIDC_EXCHANGE_FAILED;
+  if (code === AUTH_ERRORS.OIDC_CALLBACK_REPLAY_OR_DUPLICATE.code) {
+    return AUTH_ERRORS.OIDC_CALLBACK_REPLAY_OR_DUPLICATE;
   }
-  return isAbsolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+  return null;
 };
 
-const redirectToFrontendLogin = (res, { appOrigin, portal, returnTo, portalError, message }) => {
-  const loginPath = getPortalLoginPath(portal);
-  const redirectUrl = appendQuery(`${appOrigin}${loginPath}`, {
-    portalError,
-    message,
+const redirectToFrontendLogin = (res, { appOrigin, portal, returnTo, authError }) => {
+  const redirectUrl = oidcService.buildFrontendFailureRedirect({
+    appOrigin,
+    portal,
     returnTo,
+    errorCode: String(authError?.code || "").trim(),
+    message: String(authError?.message || "").trim(),
   });
   return res.redirect(302, redirectUrl);
 };
 
 const redirectToFrontendCallback = (res, { appOrigin, appCallbackPath, portal, returnTo, exchangeCode }) => {
-  const callbackPath = String(appCallbackPath || DEFAULT_OIDC_APP_CALLBACK_PATH).trim();
-  const callbackUrl = appendQuery(`${appOrigin}${callbackPath}`, {
+  const callbackUrl = oidcService.buildFrontendSuccessRedirect({
+    appOrigin,
+    appCallbackPath: String(appCallbackPath || DEFAULT_OIDC_APP_CALLBACK_PATH).trim(),
     portal,
     returnTo,
-    code: exchangeCode,
+    exchangeCode,
   });
   return res.redirect(302, callbackUrl);
 };
@@ -232,13 +305,13 @@ const partnerLogin = async (req, res) => {
     const { email, password } = req.body || {};
     const user = await authenticateCredentials({ email, password, portal: "partner" });
     if (!user) {
-      return fail(res, 401, "invalid_credentials", "Invalid email or password");
+      return failAuthContract(res, AUTH_ERRORS.INVALID_CREDENTIALS);
     }
 
     const role = String(user.role || "").toLowerCase();
     if (!PARTNER_ALLOWED_ROLES.has(role)) {
       logPartnerLogin("decision", { portal: "partner", userId: user.id, role, allowed: false });
-      return fail(res, 401, "fan_account", "Fan accounts cannot access partner login");
+      return failAuthContract(res, AUTH_ERRORS.PORTAL_MISMATCH_PARTNER_TO_FAN);
     }
     const canAccessPartner = await hasPartnerRoleAccess(user);
     if (!canAccessPartner) {
@@ -249,7 +322,7 @@ const partnerLogin = async (req, res) => {
         allowed: false,
         reason: "missing_role_mapping",
       });
-      return fail(res, 401, "invalid_credentials", "Invalid email or password");
+      return failAuthContract(res, AUTH_ERRORS.PARTNER_ACCOUNT_UNAPPROVED);
     }
 
     logPartnerLogin("decision", { portal: "partner", userId: user.id, role, allowed: true });
@@ -299,11 +372,7 @@ const fanLogin = async (req, res) => {
     clearFailedAttempts(normalizeEmail);
     const role = String(user.role || "").toLowerCase();
     if (!FAN_ALLOWED_ROLES.has(role)) {
-      return res.status(403).json({
-        error: "ROLE_NOT_ALLOWED",
-        message: "This account is for the Partner Portal.",
-        redirectTo: "/partner/login",
-      });
+      return failAuthContract(res, AUTH_ERRORS.PORTAL_MISMATCH_FAN_TO_PARTNER);
     }
 
     const payload = await buildAuthResponse(user);
@@ -450,20 +519,16 @@ const passwordReset = async (req, res) => {
 
 const oidcGoogleStart = async (req, res) => {
   try {
-    const portal = String(req.query?.portal || "").trim().toLowerCase();
-    if (portal !== "fan" && portal !== "partner") {
-      return fail(res, 400, "validation_error", "portal must be fan or partner");
-    }
-    const returnTo = oidcService.toSafeReturnTo(req.query?.returnTo || "", portal);
-    const appOrigin = String(req.query?.appOrigin || "").trim();
-    const { authorizationUrl } = await oidcService.buildGoogleAuthorizationUrl({
+    const { authorizationUrl } = await oidcService.prepareGoogleOidcStart({
       req,
-      portal,
-      returnTo,
-      appOrigin,
+      query: req.query,
     });
     return res.redirect(302, authorizationUrl);
   } catch (err) {
+    const mappedContractError = mapOidcContractErrorToAuthError(err);
+    if (mappedContractError) {
+      return failAuthContract(res, mappedContractError);
+    }
     if (err?.code === "OIDC_DISABLED") {
       return fail(res, 404, "not_found", "OIDC authentication is disabled");
     }
@@ -480,7 +545,8 @@ const oidcGoogleCallback = async (req, res) => {
   let callbackContext = {
     portal: "fan",
     returnTo: "/fan",
-    appOrigin: frontendOrigin,
+    appOrigin: oidcDefaults.appOrigin || frontendOrigin,
+    appCallbackPath: oidcDefaults.appCallbackPath || DEFAULT_OIDC_APP_CALLBACK_PATH,
   };
 
   try {
@@ -495,8 +561,7 @@ const oidcGoogleCallback = async (req, res) => {
     if (!callbackData.email || !callbackData.sub) {
       return redirectToFrontendLogin(res, {
         ...callbackContext,
-        portalError: "oidc_profile_incomplete",
-        message: "Google account did not return a usable email profile.",
+        authError: AUTH_ERRORS.OIDC_PROFILE_INCOMPLETE,
       });
     }
 
@@ -508,8 +573,7 @@ const oidcGoogleCallback = async (req, res) => {
         if (!FAN_ALLOWED_ROLES.has(existingRole)) {
           return redirectToFrontendLogin(res, {
             ...callbackContext,
-            portalError: "partner_account",
-            message: "This account belongs to the Partner Portal. Use partner login.",
+            authError: AUTH_ERRORS.PORTAL_MISMATCH_FAN_TO_PARTNER,
           });
         }
 
@@ -541,8 +605,7 @@ const oidcGoogleCallback = async (req, res) => {
     if (!existingUser) {
       return redirectToFrontendLogin(res, {
         ...callbackContext,
-        portalError: "partner_unknown_account",
-        message: "No approved partner account found for this Google email.",
+        authError: AUTH_ERRORS.PARTNER_ACCOUNT_NOT_FOUND,
       });
     }
 
@@ -550,8 +613,7 @@ const oidcGoogleCallback = async (req, res) => {
     if (!PARTNER_ALLOWED_ROLES.has(existingRole)) {
       return redirectToFrontendLogin(res, {
         ...callbackContext,
-        portalError: "fan_account",
-        message: "Fan accounts cannot sign in to the Partner Portal.",
+        authError: AUTH_ERRORS.PORTAL_MISMATCH_PARTNER_TO_FAN,
       });
     }
 
@@ -559,8 +621,7 @@ const oidcGoogleCallback = async (req, res) => {
     if (!canAccessPartner) {
       return redirectToFrontendLogin(res, {
         ...callbackContext,
-        portalError: "partner_not_approved",
-        message: "Partner account is not approved yet.",
+        authError: AUTH_ERRORS.PARTNER_ACCOUNT_UNAPPROVED,
       });
     }
 
@@ -569,6 +630,7 @@ const oidcGoogleCallback = async (req, res) => {
     const exchangeCode = oidcService.issueExchangeCode(authPayload);
     return redirectToFrontendCallback(res, { ...callbackContext, exchangeCode });
   } catch (err) {
+    const mappedContractError = mapOidcContractErrorToAuthError(err);
     try {
       if (req?.query?.state) {
         const parsed = oidcService.parseSignedState(req.query.state);
@@ -576,17 +638,21 @@ const oidcGoogleCallback = async (req, res) => {
           portal: parsed.portal,
           returnTo: parsed.returnTo,
           appOrigin: parsed.appOrigin,
+          appCallbackPath: oidcDefaults.appCallbackPath || DEFAULT_OIDC_APP_CALLBACK_PATH,
         };
       }
     } catch (_stateErr) {
       // ignored
     }
 
-    const fallbackMessage = "Google login failed. Please try again.";
+    const fallbackAuthError = mappedContractError || AUTH_ERRORS.OIDC_FAILED;
+    const fallbackMessage = String(fallbackAuthError.message || AUTH_ERRORS.OIDC_FAILED.message);
     return redirectToFrontendLogin(res, {
       ...callbackContext,
-      portalError: "oidc_failed",
-      message: fallbackMessage,
+      authError: {
+        ...fallbackAuthError,
+        message: fallbackMessage,
+      },
     });
   }
 };
@@ -595,13 +661,26 @@ const oidcGoogleExchange = async (req, res) => {
   try {
     const code = String(req.body?.code || "").trim();
     if (!code) {
-      return fail(res, 400, "validation_error", "code is required");
+      return fail(res, 400, AUTH_ERRORS.OIDC_EXCHANGE_FAILED.code, "OIDC exchange code is required.");
     }
-    const payload = oidcService.consumeExchangeCode(code);
-    if (!payload) {
-      return fail(res, 401, "invalid_exchange_code", "Invalid or expired OIDC exchange code");
+    const exchangeResult = oidcService.consumeExchangeCodeDetailed(code);
+    if (!exchangeResult?.ok) {
+      if (exchangeResult?.reason === "duplicate") {
+        return fail(
+          res,
+          AUTH_ERRORS.OIDC_CALLBACK_REPLAY_OR_DUPLICATE.status,
+          AUTH_ERRORS.OIDC_CALLBACK_REPLAY_OR_DUPLICATE.code,
+          AUTH_ERRORS.OIDC_CALLBACK_REPLAY_OR_DUPLICATE.message
+        );
+      }
+      return fail(
+        res,
+        AUTH_ERRORS.OIDC_EXCHANGE_FAILED.status,
+        AUTH_ERRORS.OIDC_EXCHANGE_FAILED.code,
+        AUTH_ERRORS.OIDC_EXCHANGE_FAILED.message
+      );
     }
-    return ok(res, payload);
+    return ok(res, exchangeResult.payload);
   } catch (err) {
     console.error("[auth.oidcGoogleExchange] failed", err);
     return fail(res, 500, "internal_server_error", "Failed to finalize Google authentication");
@@ -610,28 +689,15 @@ const oidcGoogleExchange = async (req, res) => {
 
 const refresh = async (req, res) => {
   try {
-    const refreshToken = req.body?.refreshToken || null;
-
-    if (!refreshToken) {
-      return fail(res, 401, "unauthorized", "missing_refresh_token");
+    const result = await authService.refreshSessionFromRequest({ req });
+    if (result?.ok) {
+      return ok(res, result.payload);
     }
-
-    const rotated = await authService.rotateRefreshToken({
-      refreshToken: String(refreshToken).trim(),
-    });
-    return ok(res, {
-      accessToken: rotated.accessToken,
-      refreshToken: rotated.refreshToken,
-      user: {
-        id: rotated.user.id,
-        email: rotated.user.email,
-        role: rotated.user.role,
-      },
-    });
+    const status = Number(result?.status || 401);
+    const errorCode = String(result?.code || "invalid_refresh_token");
+    const errorMessage = String(result?.message || "Invalid refresh token");
+    return fail(res, status, errorCode, errorMessage);
   } catch (err) {
-    if (err?.code === authService.INVALID_REFRESH_TOKEN_CODE) {
-      return fail(res, 401, "invalid_refresh_token", "Invalid or expired refresh token");
-    }
     console.error("[auth.refresh] failed", err);
     return fail(res, 500, "internal_server_error", "Failed to refresh token");
   }
