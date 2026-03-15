@@ -1,6 +1,16 @@
 const express = require("express");
 const { getDb } = require("../core/db/db");
+const { requireAuth } = require("../core/http/auth.middleware");
 const { applyWebhookEvent } = require("../core/payments/paymentService");
+const {
+  WEBHOOK_SIGNATURE_HEADER,
+  assertMockPaymentMutationAllowed,
+  verifyWebhookSignature,
+} = require("../core/payments/paymentTrustBoundary");
+const {
+  getSystemCurrency,
+  assertSupportedCurrency,
+} = require("../config/currency");
 const { sendEmailByTemplate } = require("../services/email.service");
 const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
 
@@ -9,6 +19,7 @@ const router = express.Router();
 const ATTEMPT_NOT_FOUND = { error: "attempt_not_found" };
 const ATTEMPT_NOT_CONFIRMABLE = { error: "attempt_not_confirmable" };
 const ORDER_DEFAULT_VIEW_PATH = "/fan/orders";
+const CURRENCY_MISMATCH = { error: "currency_mismatch" };
 
 const buildOrderViewUrl = (orderId) => {
   const safeOrderId = String(orderId || "").trim();
@@ -85,8 +96,43 @@ const sendOrderStatusUpdateEmailBestEffort = async ({
   }
 };
 
-router.post("/mock/confirm/:paymentId", async (req, res, next) => {
+const resolveIncomingCurrency = ({ currency, logSource }) => {
+  const normalizedCurrency = assertSupportedCurrency(currency, {
+    allowDefaultOnEmpty: true,
+  });
+  if (!currency) {
+    console.info("[payments.currency]", {
+      event: "currency_autoinjected",
+      currency: normalizedCurrency,
+      source: logSource,
+    });
+  }
+  return normalizedCurrency;
+};
+
+const ensurePaymentCurrencyMatches = (payment, currency) => {
+  const paymentCurrency = assertSupportedCurrency(payment?.currency || getSystemCurrency(), {
+    allowDefaultOnEmpty: true,
+  });
+  if (paymentCurrency !== currency) {
+    const err = new Error("currency_mismatch");
+    err.code = "CURRENCY_MISMATCH";
+    err.details = {
+      currency,
+      expectedCurrency: paymentCurrency,
+    };
+    throw err;
+  }
+  return paymentCurrency;
+};
+
+router.post("/mock/confirm/:paymentId", requireAuth, async (req, res, next) => {
   try {
+    const trustDecision = assertMockPaymentMutationAllowed({ req });
+    if (!trustDecision.allowed) {
+      return res.status(trustDecision.status).json(trustDecision.body);
+    }
+
     const { paymentId } = req.params;
     if (!paymentId) {
       return res.status(404).json(ATTEMPT_NOT_FOUND);
@@ -97,6 +143,11 @@ router.post("/mock/confirm/:paymentId", async (req, res, next) => {
     if (!payment) {
       return res.status(404).json({ error: "payment_not_found" });
     }
+    const requestCurrency = resolveIncomingCurrency({
+      currency: req.body?.currency,
+      logSource: "mock_confirm",
+    });
+    ensurePaymentCurrencyMatches(payment, requestCurrency);
 
     const notifyPaid = payment.status !== "paid";
     let paidOrderBuyerUserId = null;
@@ -170,6 +221,12 @@ router.post("/mock/confirm/:paymentId", async (req, res, next) => {
       idempotent: payment.status === "paid",
     });
   } catch (err) {
+    if (err?.code === "CURRENCY_MISMATCH") {
+      return res.status(400).json({
+        ...CURRENCY_MISMATCH,
+        ...err.details,
+      });
+    }
     next(err);
   }
 });
@@ -180,8 +237,28 @@ router.post("/webhook/:provider", async (req, res, next) => {
     if (!provider) {
       return res.status(400).json({ error: "provider_required" });
     }
+    const verification = verifyWebhookSignature({
+      provider,
+      rawBody: req.rawBody,
+      signatureHeader: req.headers[WEBHOOK_SIGNATURE_HEADER],
+    });
+    if (!verification.ok) {
+      console.warn("[payments.webhook] signature verification failed", {
+        provider,
+        reason: verification.reason,
+      });
+      return res.status(verification.status).json(verification.body);
+    }
 
     const payload = req.body || {};
+    const requestCurrency = resolveIncomingCurrency({
+      currency:
+        payload.currency ??
+        payload.event?.currency ??
+        payload.data?.currency ??
+        payload.payment?.currency,
+      logSource: `webhook_${provider}`,
+    });
     const providerEventId =
       payload.event?.id ?? payload.id ?? payload.event_id ?? null;
 
@@ -241,6 +318,9 @@ router.post("/webhook/:provider", async (req, res, next) => {
       payment = await db("payments")
         .where({ provider_order_id: providerOrderId })
         .first();
+    }
+    if (payment) {
+      ensurePaymentCurrencyMatches(payment, requestCurrency);
     }
 
     if (payment && insertedEvent?.id) {
@@ -308,6 +388,12 @@ router.post("/webhook/:provider", async (req, res, next) => {
       paymentId: payment?.id || null,
     });
   } catch (err) {
+    if (err?.code === "CURRENCY_MISMATCH") {
+      return res.status(400).json({
+        ...CURRENCY_MISMATCH,
+        ...err.details,
+      });
+    }
     next(err);
   }
 });

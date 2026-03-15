@@ -1,17 +1,7 @@
 const HTTP_URL_RE = /^https?:\/\//i;
-const { backendBaseUrl } = require("../config/appOrigin");
+const { resolveBackendBaseUrl } = require("../config/appOrigin");
 
-const trimTrailingSlash = (value) => String(value || "").replace(/\/+$/, "");
-
-const getBackendPublicBaseUrl = () => {
-  const envBase =
-    process.env.BACKEND_PUBLIC_URL ||
-    process.env.BACKEND_URL ||
-    process.env.PUBLIC_BASE_URL ||
-    "";
-  if (envBase) return trimTrailingSlash(envBase);
-  return backendBaseUrl;
-};
+const getBackendPublicBaseUrl = () => resolveBackendBaseUrl();
 
 const toAbsolutePublicUrl = (value) => {
   const raw = String(value || "").trim();

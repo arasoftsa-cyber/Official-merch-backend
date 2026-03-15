@@ -28,10 +28,12 @@ describe("oidc frontend origin config", () => {
     delete process.env.UI_BASE_URL;
     delete process.env.FRONTEND_URL;
     delete process.env.CLIENT_URL;
+    delete process.env.PUBLIC_URL;
+    delete process.env.APP_URL;
 
     const oidcService = require("../src/services/oidc.service");
     expect(() => oidcService.getFrontendOidcConfig()).toThrow(
-      "OIDC_APP_BASE_URL (or APP_PUBLIC_URL/UI_BASE_URL/FRONTEND_URL/CLIENT_URL) is required in production"
+      "OIDC_APP_BASE_URL is required in production"
     );
   });
 

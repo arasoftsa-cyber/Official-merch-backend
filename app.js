@@ -19,6 +19,7 @@ const {
   createRuntimeEnv,
   assertValidRuntimeEnv,
   applyRuntimeEnvCompatibility,
+  emitRuntimeEnvWarnings,
 } = require("./src/config/runtimeEnv");
 const createHealthRouter = require("./src/routes/health.routes");
 const router = require("./src/routes/index");
@@ -79,7 +80,14 @@ app.use(helmet({
     preload: true
   } : false,
 }));
-app.use(express.json({ limit: BODY_SIZE_LIMIT }));
+app.use(express.json({
+  limit: BODY_SIZE_LIMIT,
+  verify: (req, _res, buf) => {
+    if (req.originalUrl?.startsWith("/api/payments/webhook/")) {
+      req.rawBody = Buffer.from(buf);
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
 
 app.use((req, res, next) => {
@@ -251,6 +259,7 @@ const ensureSeededUserRoles = async () => {
 const startServer = async () => {
   const validatedRuntimeEnv = assertValidRuntimeEnv(runtimeEnv);
   applyRuntimeEnvCompatibility(validatedRuntimeEnv);
+  emitRuntimeEnvWarnings(validatedRuntimeEnv);
 
   const originReadiness =
     typeof getOriginConfigReadiness === "function"

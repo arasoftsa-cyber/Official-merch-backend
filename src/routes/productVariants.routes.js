@@ -19,6 +19,17 @@ const {
   validateUniqueInventorySkuMappings,
 } = require("./productVariants.validators");
 const { orderVariantsByTouchedIds } = require("./productVariants.repository");
+const {
+  normalizePutProductVariantsPayload,
+  validatePutProductVariantsPayload,
+  normalizeInventorySkuCreatePayload,
+  validateInventorySkuCreatePayload,
+  normalizeBulkDeactivateInventorySkusPayload,
+  validateBulkDeactivateInventorySkusPayload,
+  normalizePatchInventorySkuPayload,
+  validatePatchInventorySkuPayload,
+} = require("../contracts/productVariants.contract");
+const { logLegacyContractUse } = require("../contracts/shared");
 
 const router = express.Router();
 
@@ -43,8 +54,13 @@ router.put(
   express.json(),
   async (req, res, next) => {
     try {
-      const payload = req.body;
-      if (!payload || !Array.isArray(payload.variants)) {
+      const normalized = normalizePutProductVariantsPayload(req.body || {});
+      const payload = validatePutProductVariantsPayload(normalized.dto);
+      logLegacyContractUse({
+        workflow: "product_variants.put",
+        legacyKeys: normalized.meta.legacyKeys,
+      });
+      if (!Array.isArray(payload.variants)) {
         return res.status(400).json({ error: "missing_variants" });
       }
       const db = getDb();
@@ -63,6 +79,9 @@ router.put(
       }
       return res.status(result.statusCode).json(result.body);
     } catch (err) {
+      if (err?.code === "validation_error") {
+        return res.status(400).json({ error: err.message || "missing_variants" });
+      }
       const mapped = putVariantErrorResponse(err);
       if (mapped) {
         return res.status(mapped.statusCode).json(mapped.body);
@@ -107,9 +126,18 @@ router.post(
   express.json(),
   async (req, res, next) => {
     try {
-      const result = await createInventorySkuResponse({ db: getDb(), payload: req.body || {} });
+      const normalized = normalizeInventorySkuCreatePayload(req.body || {});
+      const payload = validateInventorySkuCreatePayload(normalized.dto);
+      logLegacyContractUse({
+        workflow: "inventory_skus.create",
+        legacyKeys: normalized.meta.legacyKeys,
+      });
+      const result = await createInventorySkuResponse({ db: getDb(), payload });
       return res.status(result.statusCode).json(result.body);
     } catch (err) {
+      if (err?.code === "validation_error") {
+        return res.status(400).json({ error: err.message || "validation_error" });
+      }
       if (err?.code === "23505") {
         return res.status(409).json({ error: "supplier_sku_conflict" });
       }
@@ -125,12 +153,21 @@ router.post(
   express.json(),
   async (req, res, next) => {
     try {
+      const normalized = normalizeBulkDeactivateInventorySkusPayload(req.body || {});
+      const payload = validateBulkDeactivateInventorySkusPayload(normalized.dto);
+      logLegacyContractUse({
+        workflow: "inventory_skus.bulk_deactivate",
+        legacyKeys: normalized.meta.legacyKeys,
+      });
       const result = await bulkDeactivateInventorySkusResponse({
         db: getDb(),
-        payload: req.body || {},
+        payload,
       });
       return res.status(result.statusCode).json(result.body);
     } catch (err) {
+      if (err?.code === "validation_error") {
+        return res.status(400).json({ error: err.message || "validation_error" });
+      }
       return next(err);
     }
   }
@@ -147,13 +184,22 @@ router.patch(
       if (!skuId) {
         return res.status(400).json({ error: "invalid_inventory_sku_id" });
       }
+      const normalized = normalizePatchInventorySkuPayload(req.body || {});
+      const payload = validatePatchInventorySkuPayload(normalized.dto);
+      logLegacyContractUse({
+        workflow: "inventory_skus.patch",
+        legacyKeys: normalized.meta.legacyKeys,
+      });
       const result = await patchInventorySkuResponse({
         db: getDb(),
         skuId,
-        payload: req.body || {},
+        payload,
       });
       return res.status(result.statusCode).json(result.body);
     } catch (err) {
+      if (err?.code === "validation_error") {
+        return res.status(400).json({ error: err.message || "validation_error" });
+      }
       if (err?.code === "23505") {
         return res.status(409).json({ error: "supplier_sku_conflict" });
       }

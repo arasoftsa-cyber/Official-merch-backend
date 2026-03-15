@@ -3,6 +3,7 @@
 const { Issuer, generators } = require("openid-client");
 const jwt = require("jsonwebtoken");
 const { randomUUID } = require("crypto");
+const { createRuntimeEnv } = require("../config/runtimeEnv");
 const {
   frontendOrigin,
   backendBaseUrl,
@@ -23,15 +24,6 @@ const EXCHANGE_CODE_TTL_MS = 60 * 1000;
 const OIDC_CALLBACK_PATH = "/api/auth/oidc/google/callback";
 const DEFAULT_APP_CALLBACK_PATH = "/auth/oidc/callback";
 const OIDC_STATE_VERSION = 1;
-const FRONTEND_ORIGIN_ENV_KEYS = [
-  "OIDC_APP_BASE_URL",
-  "APP_PUBLIC_URL",
-  "UI_BASE_URL",
-  "FRONTEND_URL",
-  "CLIENT_URL",
-  "PUBLIC_URL",
-  "APP_URL",
-];
 
 let oidcClientPromise = null;
 let oidcConfigCache = null;
@@ -270,12 +262,10 @@ const normalizeAppCallbackPath = (rawValue, label) => {
 };
 
 const getConfiguredFrontendOrigins = () => {
-  const explicit = [];
-  for (const envKey of FRONTEND_ORIGIN_ENV_KEYS) {
-    const raw = String(process.env[envKey] || "").trim();
-    if (!raw) continue;
-    explicit.push(normalizeConfiguredOrigin(raw, envKey));
-  }
+  const runtimeEnv = createRuntimeEnv(process.env);
+  const explicit = runtimeEnv.origins.oidcAppBaseUrl
+    ? [normalizeConfiguredOrigin(runtimeEnv.origins.oidcAppBaseUrl, "OIDC_APP_BASE_URL")]
+    : [];
 
   const corsConfigured = splitConfiguredOrigins(process.env.CORS_ORIGINS).map((value, index) =>
     normalizeConfiguredOrigin(value, `CORS_ORIGINS[${index}]`)
@@ -295,9 +285,7 @@ const getFrontendOidcConfig = () => {
   const primaryExplicitOrigin = explicit[0] || "";
 
   if (prod && !primaryExplicitOrigin) {
-    throw asOidcMisconfigured(
-      "OIDC_APP_BASE_URL (or APP_PUBLIC_URL/UI_BASE_URL/FRONTEND_URL/CLIENT_URL) is required in production"
-    );
+    throw asOidcMisconfigured("OIDC_APP_BASE_URL is required in production");
   }
 
   const fallbackOrigin = prod ? "" : frontendOrigin;
@@ -325,7 +313,7 @@ const getFrontendOidcConfig = () => {
     primaryOrigin,
     allowedOrigins,
     appCallbackPath: normalizeAppCallbackPath(
-      process.env.OIDC_APP_CALLBACK_PATH || process.env.OIDC_FRONTEND_CALLBACK_PATH,
+      createRuntimeEnv(process.env).env.oidcAppCallbackPath || DEFAULT_APP_CALLBACK_PATH,
       "OIDC_APP_CALLBACK_PATH"
     ),
   };

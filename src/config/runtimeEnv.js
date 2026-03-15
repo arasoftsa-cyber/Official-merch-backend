@@ -1,5 +1,12 @@
 "use strict";
 
+const {
+  trim,
+  trimNoTrailingSlash,
+  canonicalEnvAliasDefinitions,
+  resolveCanonicalEnvMap,
+} = require("../core/config/envAliases");
+
 const OIDC_CALLBACK_PATH = "/api/auth/oidc/google/callback";
 const DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173";
 const DEFAULT_BACKEND_BASE_URL = "http://localhost:3000";
@@ -7,77 +14,12 @@ const DEFAULT_PORT = "3000";
 const DEFAULT_BODY_SIZE_LIMIT = "2mb";
 const STORAGE_PROVIDER_LOCAL = "local";
 const STORAGE_PROVIDER_OBJECT = "object";
-
-const FRONTEND_ORIGIN_BASE_KEYS = Object.freeze([
-  "FRONTEND_ORIGIN",
-  "PUBLIC_APP_ORIGIN",
-  "APP_PUBLIC_URL",
-  "OIDC_APP_BASE_URL",
-  "UI_BASE_URL",
-  "FRONTEND_URL",
-  "CLIENT_URL",
-  "PUBLIC_URL",
-  "APP_URL",
-]);
-
-const BACKEND_BASE_URL_BASE_KEYS = Object.freeze([
-  "BACKEND_BASE_URL",
-  "BACKEND_PUBLIC_URL",
-  "BACKEND_URL",
-  "PUBLIC_BASE_URL",
-]);
-
-const OIDC_APP_BASE_URL_KEYS = Object.freeze([
-  "OIDC_APP_BASE_URL",
-  "APP_PUBLIC_URL",
-  "UI_BASE_URL",
-  "FRONTEND_URL",
-  "CLIENT_URL",
-  "PUBLIC_URL",
-  "APP_URL",
-]);
-
-const trim = (value) => String(value || "").trim();
-const trimNoTrailingSlash = (value) => trim(value).replace(/\/+$/, "");
 const isTruthy = (value) => /^(1|true|yes|on)$/i.test(trim(value));
 const isFalsey = (value) => /^(0|false|no|off)$/i.test(trim(value));
 const isLocalhost = (hostname) => {
   const host = String(hostname || "").toLowerCase();
   return host === "localhost" || host === "127.0.0.1" || host === "::1";
 };
-
-const pickFirst = (env, keys, normalizer = trimNoTrailingSlash) => {
-  for (const key of keys) {
-    const value = normalizer(env[key]);
-    if (value) {
-      return { key, value };
-    }
-  }
-  return { key: "", value: "" };
-};
-
-const getFrontendOriginKeys = ({ isProduction, isTest, isCi }) =>
-  [
-    "FRONTEND_ORIGIN",
-    "PUBLIC_APP_ORIGIN",
-    isTest ? "TEST_FRONTEND_ORIGIN" : "",
-    isCi ? "CI_FRONTEND_ORIGIN" : "",
-    isProduction ? "PROD_FRONTEND_ORIGIN" : "",
-    isProduction ? "FRONTEND_ORIGIN_PROD" : "FRONTEND_ORIGIN_DEV",
-    "DEV_FRONTEND_ORIGIN",
-    ...FRONTEND_ORIGIN_BASE_KEYS.slice(2),
-  ].filter(Boolean);
-
-const getBackendBaseUrlKeys = ({ isProduction, isTest, isCi }) =>
-  [
-    "BACKEND_BASE_URL",
-    isTest ? "TEST_BACKEND_BASE_URL" : "",
-    isCi ? "CI_BACKEND_BASE_URL" : "",
-    isProduction ? "PROD_BACKEND_BASE_URL" : "",
-    isProduction ? "BACKEND_BASE_URL_PROD" : "BACKEND_BASE_URL_DEV",
-    "DEV_BACKEND_BASE_URL",
-    ...BACKEND_BASE_URL_BASE_KEYS.slice(1),
-  ].filter(Boolean);
 
 const parseHttpOrigin = (value, label, errors) => {
   const raw = trimNoTrailingSlash(value);
@@ -193,6 +135,8 @@ const parseOidcRedirectUri = (value, errors) => {
   return parsed.toString();
 };
 
+const emittedRuntimeEnvWarningKeys = new Set();
+
 const createRuntimeEnv = (env = process.env) => {
   const warnings = [];
   const errors = [];
@@ -206,24 +150,24 @@ const createRuntimeEnv = (env = process.env) => {
 
   const port = trim(env.PORT) || DEFAULT_PORT;
   const bodySizeLimit = trim(env.BODY_SIZE_LIMIT) || DEFAULT_BODY_SIZE_LIMIT;
-
-  const frontendOriginPicked = pickFirst(env, getFrontendOriginKeys({ isProduction, isTest, isCi }));
-  const backendBaseUrlPicked = pickFirst(env, getBackendBaseUrlKeys({ isProduction, isTest, isCi }));
-  const oidcAppBaseUrlPicked = pickFirst(env, OIDC_APP_BASE_URL_KEYS);
+  const aliasDefinitions = canonicalEnvAliasDefinitions({ isProduction, isTest, isCi });
+  const aliasResolution = resolveCanonicalEnvMap(env, aliasDefinitions);
+  errors.push(...aliasResolution.errors);
+  warnings.push(...aliasResolution.warnings);
 
   let frontendOrigin = parseHttpOrigin(
-    frontendOriginPicked.value,
-    frontendOriginPicked.key || "FRONTEND_ORIGIN",
+    aliasResolution.values.FRONTEND_ORIGIN,
+    aliasResolution.sources.FRONTEND_ORIGIN || "FRONTEND_ORIGIN",
     errors
   );
   let backendBaseUrl = parseHttpBaseUrl(
-    backendBaseUrlPicked.value,
-    backendBaseUrlPicked.key || "BACKEND_BASE_URL",
+    aliasResolution.values.BACKEND_BASE_URL,
+    aliasResolution.sources.BACKEND_BASE_URL || "BACKEND_BASE_URL",
     errors
   );
   let oidcAppBaseUrl = parseHttpOrigin(
-    oidcAppBaseUrlPicked.value,
-    oidcAppBaseUrlPicked.key || "OIDC_APP_BASE_URL",
+    aliasResolution.values.OIDC_APP_BASE_URL,
+    aliasResolution.sources.OIDC_APP_BASE_URL || "OIDC_APP_BASE_URL",
     errors
   );
 
@@ -240,12 +184,12 @@ const createRuntimeEnv = (env = process.env) => {
   if (isProduction) {
     if (!frontendOrigin) {
       errors.push(
-        "Missing frontend origin. Set FRONTEND_ORIGIN (canonical) or a documented compatibility alias."
+        "Missing frontend origin. Set FRONTEND_ORIGIN."
       );
     }
     if (!backendBaseUrl) {
       errors.push(
-        "Missing backend base URL. Set BACKEND_BASE_URL (canonical) or a documented compatibility alias."
+        "Missing backend base URL. Set BACKEND_BASE_URL."
       );
     }
     if (frontendOrigin) {
@@ -268,7 +212,7 @@ const createRuntimeEnv = (env = process.env) => {
   const oidcEnabled = !isFalsey(oidcEnabledRaw);
   const oidcRedirectUri = parseOidcRedirectUri(env.OIDC_REDIRECT_URI, errors);
   const oidcAppCallbackPath = parseRelativePath(
-    env.OIDC_APP_CALLBACK_PATH || env.OIDC_FRONTEND_CALLBACK_PATH,
+    aliasResolution.values.OIDC_APP_CALLBACK_PATH,
     "OIDC_APP_CALLBACK_PATH",
     errors,
     "/auth/oidc/callback"
@@ -276,7 +220,7 @@ const createRuntimeEnv = (env = process.env) => {
 
   if (oidcEnabled && isProduction && !oidcAppBaseUrl) {
     errors.push(
-      "OIDC_APP_BASE_URL is required in production when OIDC is enabled (compatibility aliases are accepted)."
+      "OIDC_APP_BASE_URL is required in production when OIDC is enabled."
     );
   }
   if (oidcEnabled && isProduction && oidcAppBaseUrl) {
@@ -286,9 +230,8 @@ const createRuntimeEnv = (env = process.env) => {
     }
   }
 
-  const jwtSecret = trim(env.JWT_SECRET);
-  const jwtAccessSecretAlias = trim(env.JWT_ACCESS_SECRET);
-  const accessTokenSecret = jwtSecret || jwtAccessSecretAlias;
+  const jwtSecret = aliasResolution.values.JWT_SECRET;
+  const accessTokenSecret = jwtSecret;
   const refreshTokenSecret = trim(env.JWT_REFRESH_SECRET);
 
   if (!isTest) {
@@ -299,15 +242,8 @@ const createRuntimeEnv = (env = process.env) => {
       errors.push("Missing JWT_REFRESH_SECRET.");
     }
     if (accessTokenSecret && refreshTokenSecret && accessTokenSecret === refreshTokenSecret) {
-      errors.push("JWT_REFRESH_SECRET must be different from JWT_SECRET/JWT_ACCESS_SECRET.");
+      errors.push("JWT_REFRESH_SECRET must be different from JWT_SECRET.");
     }
-  }
-
-  if (!jwtSecret && jwtAccessSecretAlias) {
-    warnings.push("JWT_ACCESS_SECRET alias is in use; set JWT_SECRET as canonical key.");
-  }
-  if (jwtSecret && jwtAccessSecretAlias && jwtSecret !== jwtAccessSecretAlias) {
-    warnings.push("JWT_ACCESS_SECRET differs from JWT_SECRET; JWT_SECRET is authoritative.");
   }
 
   const storageProvider = trim(env.STORAGE_PROVIDER).toLowerCase() || STORAGE_PROVIDER_LOCAL;
@@ -347,6 +283,7 @@ const createRuntimeEnv = (env = process.env) => {
     ok: errors.length === 0,
     errors,
     warnings,
+    aliasWarnings: aliasResolution.aliasWarnings,
     flags: {
       nodeEnv,
       appEnv: appEnvRaw,
@@ -371,9 +308,11 @@ const createRuntimeEnv = (env = process.env) => {
       oidcAppBaseUrl,
     },
     sources: {
-      frontendOrigin: frontendOriginPicked.key,
-      backendBaseUrl: backendBaseUrlPicked.key,
-      oidcAppBaseUrl: oidcAppBaseUrlPicked.key,
+      frontendOrigin: aliasResolution.sources.FRONTEND_ORIGIN,
+      backendBaseUrl: aliasResolution.sources.BACKEND_BASE_URL,
+      oidcAppBaseUrl: aliasResolution.sources.OIDC_APP_BASE_URL,
+      oidcAppCallbackPath: aliasResolution.sources.OIDC_APP_CALLBACK_PATH,
+      jwtSecret: aliasResolution.sources.JWT_SECRET,
     },
     originReadiness,
   };
@@ -403,16 +342,23 @@ const applyRuntimeEnvCompatibility = (runtimeEnv) => {
   return resolved;
 };
 
+const emitRuntimeEnvWarnings = (runtimeEnv, warn = console.warn) => {
+  const resolved = runtimeEnv || createRuntimeEnv(process.env);
+  for (const warning of resolved.aliasWarnings || []) {
+    const warningKey = `${warning.event}:${warning.canonicalKey}`;
+    if (emittedRuntimeEnvWarningKeys.has(warningKey)) continue;
+    emittedRuntimeEnvWarningKeys.add(warningKey);
+    warn("[startup.env]", warning);
+  }
+  return resolved;
+};
+
 module.exports = {
-  FRONTEND_ORIGIN_BASE_KEYS,
-  BACKEND_BASE_URL_BASE_KEYS,
-  getFrontendOriginKeys,
-  getBackendBaseUrlKeys,
-  OIDC_APP_BASE_URL_KEYS,
   OIDC_CALLBACK_PATH,
   DEFAULT_FRONTEND_ORIGIN,
   DEFAULT_BACKEND_BASE_URL,
   createRuntimeEnv,
   assertValidRuntimeEnv,
   applyRuntimeEnvCompatibility,
+  emitRuntimeEnvWarnings,
 };

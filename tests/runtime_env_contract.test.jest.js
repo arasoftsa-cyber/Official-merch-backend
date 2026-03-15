@@ -1,6 +1,9 @@
 "use strict";
 
-const { createRuntimeEnv } = require("../src/config/runtimeEnv");
+const {
+  createRuntimeEnv,
+  emitRuntimeEnvWarnings,
+} = require("../src/config/runtimeEnv");
 
 describe("runtime env contract", () => {
   it("uses safe localhost defaults in development when origin env is unset", () => {
@@ -111,6 +114,106 @@ describe("runtime env contract", () => {
           "OIDC_REDIRECT_URI path must be exactly /api/auth/oidc/google/callback"
         ),
       ])
+    );
+  });
+
+  it("accepts alias-only origin inputs while recording deprecation visibility", () => {
+    const resolved = createRuntimeEnv({
+      NODE_ENV: "production",
+      APP_ENV: "production",
+      PUBLIC_APP_ORIGIN: "https://officialmerch.tech",
+      APP_PUBLIC_URL: "https://officialmerch.tech",
+      BACKEND_PUBLIC_URL: "https://api.officialmerch.tech",
+      JWT_ACCESS_SECRET: "access-secret",
+      JWT_REFRESH_SECRET: "refresh-secret",
+      OIDC_ENABLED: "false",
+    });
+
+    expect(resolved.ok).toBe(true);
+    expect(resolved.origins.frontendOrigin).toBe("https://officialmerch.tech");
+    expect(resolved.origins.backendBaseUrl).toBe("https://api.officialmerch.tech");
+    expect(resolved.origins.oidcAppBaseUrl).toBe("https://officialmerch.tech");
+    expect(resolved.env.accessTokenSecret).toBe("access-secret");
+    expect(resolved.aliasWarnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "env_alias_used",
+          canonicalKey: "OIDC_APP_BASE_URL",
+          aliasKey: "APP_PUBLIC_URL",
+        }),
+      ])
+    );
+  });
+
+  it("prefers canonical values when aliases are also present with the same value", () => {
+    const resolved = createRuntimeEnv({
+      NODE_ENV: "production",
+      APP_ENV: "production",
+      FRONTEND_ORIGIN: "https://officialmerch.tech",
+      PUBLIC_APP_ORIGIN: "https://officialmerch.tech",
+      BACKEND_BASE_URL: "https://api.officialmerch.tech",
+      BACKEND_PUBLIC_URL: "https://api.officialmerch.tech",
+      OIDC_APP_BASE_URL: "https://officialmerch.tech",
+      APP_PUBLIC_URL: "https://officialmerch.tech",
+      JWT_SECRET: "access-secret",
+      JWT_ACCESS_SECRET: "access-secret",
+      JWT_REFRESH_SECRET: "refresh-secret",
+      OIDC_ENABLED: "false",
+    });
+
+    expect(resolved.ok).toBe(true);
+    expect(resolved.sources.frontendOrigin).toBe("FRONTEND_ORIGIN");
+    expect(resolved.sources.backendBaseUrl).toBe("BACKEND_BASE_URL");
+    expect(resolved.sources.oidcAppBaseUrl).toBe("OIDC_APP_BASE_URL");
+    expect(resolved.sources.jwtSecret).toBe("JWT_SECRET");
+    expect(resolved.aliasWarnings).toEqual([]);
+  });
+
+  it("fails clearly when canonical and alias values conflict", () => {
+    const resolved = createRuntimeEnv({
+      NODE_ENV: "production",
+      APP_ENV: "production",
+      FRONTEND_ORIGIN: "https://officialmerch.tech",
+      PUBLIC_APP_ORIGIN: "https://staging.officialmerch.tech",
+      BACKEND_BASE_URL: "https://api.officialmerch.tech",
+      OIDC_APP_BASE_URL: "https://officialmerch.tech",
+      JWT_SECRET: "access-secret",
+      JWT_REFRESH_SECRET: "refresh-secret",
+      OIDC_ENABLED: "false",
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Conflicting environment values for FRONTEND_ORIGIN"),
+      ])
+    );
+  });
+
+  it("emits one structured startup warning per canonical key when aliases are used", () => {
+    const resolved = createRuntimeEnv({
+      NODE_ENV: "production",
+      APP_ENV: "production",
+      PUBLIC_APP_ORIGIN: "https://officialmerch.tech",
+      APP_PUBLIC_URL: "https://officialmerch.tech",
+      BACKEND_PUBLIC_URL: "https://api.officialmerch.tech",
+      JWT_ACCESS_SECRET: "access-secret",
+      JWT_REFRESH_SECRET: "refresh-secret",
+      OIDC_ENABLED: "false",
+    });
+    const warn = jest.fn();
+
+    emitRuntimeEnvWarnings(resolved, warn);
+    emitRuntimeEnvWarnings(resolved, warn);
+
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(warn).toHaveBeenCalledWith(
+      "[startup.env]",
+      expect.objectContaining({
+        event: "env_alias_used",
+        canonicalKey: "JWT_SECRET",
+        aliasKey: "JWT_ACCESS_SECRET",
+      })
     );
   });
 });

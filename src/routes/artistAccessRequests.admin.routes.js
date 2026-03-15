@@ -1,7 +1,15 @@
 const express = require("express");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { requirePolicy } = require("../core/http/policy.middleware");
-const { isUuid, trim } = require("./artistAccessRequests.admin.validators");
+const { isUuid } = require("./artistAccessRequests.admin.validators");
+const {
+  normalizeAdminArtistAccessApprovalPayload,
+  validateAdminArtistAccessApprovalPayload,
+  normalizeAdminArtistAccessRejectionPayload,
+  validateAdminArtistAccessRejectionPayload,
+  normalizeAdminArtistAccessListQuery,
+} = require("../contracts/artistAccessRequest.contract");
+const { logLegacyContractUse } = require("../contracts/shared");
 const {
   approveArtistRequestAction,
   processApproval,
@@ -21,7 +29,8 @@ const writePolicy = requirePolicy("admin_dashboard:write", "artist_access_reques
 
 ROUTER.get("/", requireAuth, readPolicy, async (req, res) => {
   try {
-    const result = await listAdminArtistAccessRequests({ query: req.query || {} });
+    const { dto } = normalizeAdminArtistAccessListQuery(req.query || {});
+    const result = await listAdminArtistAccessRequests({ query: dto });
     return res.status(result.httpStatus).json(result.payload);
   } catch (err) {
     console.error("artist-access-requests admin list error", err);
@@ -45,10 +54,17 @@ ROUTER.post("/:id/approve", requireAuth, writePolicy, async (req, res) => {
       return res.status(400).json({ error: "validation_error", message: "Invalid id" });
     }
 
+    const { dto, meta } = normalizeAdminArtistAccessApprovalPayload(req.body || {});
+    validateAdminArtistAccessApprovalPayload(dto);
+    logLegacyContractUse({
+      workflow: "artist_access_requests.admin.approve",
+      legacyKeys: meta.legacyKeys,
+    });
+
     const approval = await approveArtistRequestAction({
       id: req.params.id,
       adminId: req.user?.id || null,
-      body: req.body || {},
+      body: dto,
     });
     if (approval.httpStatus !== 200) {
       return res.status(approval.httpStatus).json(approval.payload);
@@ -85,17 +101,17 @@ ROUTER.post("/:id/reject", requireAuth, writePolicy, express.json(), async (req,
       return res.status(400).json({ error: "validation_error", message: "Invalid id" });
     }
 
-    const comment = trim(req.body?.comment);
-    if (!comment) {
-      return res
-        .status(400)
-        .json({ error: "validation_error", message: "Rejection comment is required" });
-    }
+    const { dto, meta } = normalizeAdminArtistAccessRejectionPayload(req.body || {});
+    validateAdminArtistAccessRejectionPayload(dto);
+    logLegacyContractUse({
+      workflow: "artist_access_requests.admin.reject",
+      legacyKeys: meta.legacyKeys,
+    });
 
     const result = await processRejection({
       id: req.params.id,
       adminId: req.user?.id || null,
-      comment,
+      comment: dto.comment,
     });
 
     if (result.notFound) {
@@ -112,12 +128,18 @@ ROUTER.post("/:id/reject", requireAuth, writePolicy, express.json(), async (req,
       void sendRejectionEmail({
         email: result.email,
         artistName: result.artistName,
-        comment,
+        comment: dto.comment,
       });
     }
 
     return res.status(200).json({ status: "rejected" });
   } catch (err) {
+    if (err?.status === 400) {
+      return res.status(400).json({
+        error: err.code || "validation_error",
+        message: err.message || "Invalid rejection payload",
+      });
+    }
     console.error("[reject_artist_request]", err?.stack || err);
     return res.status(500).json({ error: "internal_server_error" });
   }

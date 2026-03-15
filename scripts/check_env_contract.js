@@ -1,7 +1,11 @@
 "use strict";
 
 const envLoader = require("../src/core/config/env");
-const { createRuntimeEnv, applyRuntimeEnvCompatibility } = require("../src/config/runtimeEnv");
+const {
+  createRuntimeEnv,
+  applyRuntimeEnvCompatibility,
+  emitRuntimeEnvWarnings,
+} = require("../src/config/runtimeEnv");
 
 const args = process.argv.slice(2);
 const forceProduction =
@@ -23,6 +27,7 @@ if (!runtimeEnv.ok) {
 }
 
 applyRuntimeEnvCompatibility(runtimeEnv);
+emitRuntimeEnvWarnings(runtimeEnv);
 
 const envDiagnostics =
   typeof envLoader.getEnvDiagnostics === "function"

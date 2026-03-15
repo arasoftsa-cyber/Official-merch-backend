@@ -1,12 +1,21 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
-const { z } = require("zod");
 const { getDb } = require("../core/db/db");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { ok, fail } = require("../core/http/errorResponse");
 const rateLimit = require("../core/http/rateLimit");
 const { orderSpamGuard } = require("../core/http/spamDetection");
 const { startPaymentForOrder } = require("../core/payments/paymentService");
+const {
+  getSystemCurrency,
+  assertSupportedCurrency,
+} = require("../config/currency");
+const {
+  normalizeCreateOrderPayload,
+  validateCreateOrderPayload,
+  normalizeOrderPaymentPayload,
+} = require("../contracts/orders.contract");
+const { logLegacyContractUse } = require("../contracts/shared");
 const { sendEmailByTemplate } = require("../services/email.service");
 const { buildPublicAppUrl } = require("../services/appPublicUrl.service");
 const {
@@ -28,38 +37,7 @@ const ORDER_NOT_PAYABLE = "order_not_payable";
 const VALIDATION_ERROR = "validation_error";
 const ORDER_ALREADY_CANCELLED = "order_already_cancelled";
 const ORDER_NOT_CANCELLABLE = "order_not_cancellable";
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const orderLineSchema = z.object({
-  productId: z.string().trim().regex(UUID_RE, "productId must be a valid UUID"),
-  productVariantId: z
-    .string()
-    .trim()
-    .regex(UUID_RE, "productVariantId must be a valid UUID"),
-  quantity: z.coerce
-    .number()
-    .int("quantity must be an integer")
-    .min(1, "quantity must be at least 1")
-    .max(10, "quantity must be at most 10"),
-});
-const orderItemsSchema = z
-  .array(orderLineSchema)
-  .min(1, "items must contain at least one item")
-  .max(50, "items cannot exceed 50 items");
-
-const parseOrderItems = (body) => {
-  if (Array.isArray(body?.items)) {
-    return orderItemsSchema.parse(body.items);
-  }
-
-  return orderItemsSchema.parse([
-    {
-      productId: body?.productId,
-      productVariantId: body?.productVariantId,
-      quantity: body?.quantity,
-    },
-  ]);
-};
+const CURRENCY_MISMATCH = "currency_mismatch";
 
 const asNullableNumber = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -274,6 +252,7 @@ const formatOrder = (row) => {
     buyerUserId: row.buyer_user_id,
     status: row.status,
     totalCents: row.total_cents,
+    currency: getSystemCurrency(),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -344,7 +323,7 @@ const sendOrderConfirmationEmailBestEffort = async ({ db, user, order, items }) 
       payload: {
         orderId: order.id,
         totalCents: order.total_cents,
-        currency: "INR",
+        currency: getSystemCurrency(),
         itemCount: Array.isArray(items) ? items.length : null,
         orderUrl,
       },
@@ -482,6 +461,7 @@ const listOrdersHandler = async (req, res, next) => {
         id: order.id,
         status: order.status,
         totalCents: order.totalCents ?? order.total_cents ?? null,
+        currency: getSystemCurrency(),
         createdAt: order.created_at,
         itemsCount: countMap[order.id] || 0,
         payment:
@@ -524,6 +504,10 @@ registerOrderLifecycleRoutes(router, {
   sendOrderStatusUpdateEmailBestEffort,
   startPaymentForOrder,
   ORDER_NOT_PAYABLE,
+  getSystemCurrency,
+  assertSupportedCurrency,
+  CURRENCY_MISMATCH,
+  normalizeOrderPaymentPayload,
 });
 
 registerOrderCreateRoutes(router, {
@@ -536,8 +520,6 @@ registerOrderCreateRoutes(router, {
   fail,
   FORBIDDEN,
   rejectIfNotBuyer,
-  parseOrderItems,
-  z,
   VALIDATION_ERROR,
   getDb,
   getOrderItemColumns,
@@ -550,6 +532,13 @@ registerOrderCreateRoutes(router, {
   sendOrderConfirmationEmailBestEffort,
   PRODUCT_NOT_FOUND,
   OUT_OF_STOCK,
+  getSystemCurrency,
+  assertSupportedCurrency,
+  CURRENCY_MISMATCH,
+  normalizeCreateOrderPayload,
+  validateCreateOrderPayload,
+  normalizeOrderPaymentPayload,
+  logLegacyContractUse,
 });
 
 module.exports = router;

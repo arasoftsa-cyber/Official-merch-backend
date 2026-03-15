@@ -1,5 +1,12 @@
 const express = require("express");
-const { trim, submitArtistAccessRequest, checkArtistAccessAvailability } = require("../services/artistAccessRequests.service");
+const { submitArtistAccessRequest, checkArtistAccessAvailability } = require("../services/artistAccessRequests.service");
+const {
+  normalizeArtistAccessCheckQuery,
+  validateArtistAccessCheckQuery,
+  normalizeArtistAccessSubmissionPayload,
+  validateArtistAccessSubmissionPayload,
+} = require("../contracts/artistAccessRequest.contract");
+const { logLegacyContractUse } = require("../contracts/shared");
 
 const router = express.Router();
 const MAX_MULTIPART_BYTES = 2 * 1024 * 1024;
@@ -114,21 +121,20 @@ const parseMultipartFormData = async (req) => {
 
 router.get("/check", async (req, res) => {
   try {
-    const handle = trim(req.query?.handle).toLowerCase().replace(/^@+/, "");
-    const email = trim(req.query?.email).toLowerCase();
-    const phone = trim(req.query?.phone).replace(/\D+/g, "");
+    const { dto } = normalizeArtistAccessCheckQuery(req.query || {});
+    const query = validateArtistAccessCheckQuery(dto);
 
     let field = null;
     let value = "";
-    if (handle) {
+    if (query.handle) {
       field = "handle";
-      value = handle;
-    } else if (email) {
+      value = query.handle;
+    } else if (query.email) {
       field = "email";
-      value = email;
-    } else if (phone) {
+      value = query.email;
+    } else if (query.phone) {
       field = "phone";
-      value = phone;
+      value = query.phone;
     }
 
     const result = await checkArtistAccessAvailability({ field, value });
@@ -156,8 +162,14 @@ router.post("/", async (req, res) => {
       });
     }
 
-    const rawBody = multipart?.fields || req.body || {};
-    const result = await submitArtistAccessRequest({ rawBody, file: multipart?.file || null });
+    const { dto, meta } = normalizeArtistAccessSubmissionPayload(multipart?.fields || req.body || {});
+    validateArtistAccessSubmissionPayload(dto);
+    logLegacyContractUse({
+      workflow: "artist_access_requests.create",
+      legacyKeys: meta.legacyKeys,
+    });
+
+    const result = await submitArtistAccessRequest({ rawBody: dto, file: multipart?.file || null });
     return res.status(201).json({ ok: true, request_id: result.request_id, created_at: result.created_at });
   } catch (error) {
     if (error?.code === "validation") {

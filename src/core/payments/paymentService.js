@@ -1,6 +1,10 @@
 const { randomUUID } = require("crypto");
 const { getDb } = require("../db/db");
 const mockProvider = require("./providers/mockProvider");
+const {
+  getSystemCurrency,
+  assertSupportedCurrency,
+} = require("../../config/currency");
 
 const providers = {
   [mockProvider.name]: mockProvider,
@@ -12,7 +16,7 @@ const ATTEMPTS_TABLE = "payment_attempts";
 
 const getProvider = (name = "mock") => providers[name] || mockProvider;
 
-const startPaymentForOrder = async ({ knex, orderId, buyerUserId }) => {
+const startPaymentForOrder = async ({ knex, orderId, buyerUserId, currency }) => {
   const now = knex.fn.now();
   return knex.transaction(async (trx) => {
     const order = await trx(ORDERS_TABLE).where({ id: orderId }).first();
@@ -27,6 +31,10 @@ const startPaymentForOrder = async ({ knex, orderId, buyerUserId }) => {
       throw err;
     }
 
+    const normalizedCurrency = assertSupportedCurrency(currency, {
+      allowDefaultOnEmpty: true,
+    });
+
     let payment = await trx(PAYMENTS_TABLE)
       .where({ order_id: orderId })
       .forUpdate()
@@ -40,13 +48,22 @@ const startPaymentForOrder = async ({ knex, orderId, buyerUserId }) => {
           status: "pending",
           provider: "mock",
           amount_cents: order.total_cents,
-          currency: "INR",
+          currency: normalizedCurrency,
           created_at: now,
           updated_at: now,
         })
         .returning(["id", "status", "provider"]);
       payment = newPayment;
     } else if (payment.status === "paid") {
+      const paymentCurrency = assertSupportedCurrency(
+        payment.currency || getSystemCurrency(),
+        { allowDefaultOnEmpty: true }
+      );
+      if (paymentCurrency !== normalizedCurrency) {
+        const err = new Error("currency_mismatch");
+        err.code = "CURRENCY_MISMATCH";
+        throw err;
+      }
       return {
         paymentId: payment.id,
         status: "paid",
@@ -54,10 +71,29 @@ const startPaymentForOrder = async ({ knex, orderId, buyerUserId }) => {
         attemptId: null,
       };
     } else if (["unpaid", "failed"].includes(payment.status)) {
+      const paymentCurrency = assertSupportedCurrency(
+        payment.currency || getSystemCurrency(),
+        { allowDefaultOnEmpty: true }
+      );
+      if (paymentCurrency !== normalizedCurrency) {
+        const err = new Error("currency_mismatch");
+        err.code = "CURRENCY_MISMATCH";
+        throw err;
+      }
       await trx(PAYMENTS_TABLE)
         .where({ id: payment.id })
         .update({ status: "pending", updated_at: now });
       payment = await trx(PAYMENTS_TABLE).where({ id: payment.id }).first();
+    } else {
+      const paymentCurrency = assertSupportedCurrency(
+        payment.currency || getSystemCurrency(),
+        { allowDefaultOnEmpty: true }
+      );
+      if (paymentCurrency !== normalizedCurrency) {
+        const err = new Error("currency_mismatch");
+        err.code = "CURRENCY_MISMATCH";
+        throw err;
+      }
     }
 
     let attempt = await trx(ATTEMPTS_TABLE)
