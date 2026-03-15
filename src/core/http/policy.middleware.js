@@ -2,18 +2,23 @@ const { can } = require("../rbac");
 
 const FORBIDDEN = { error: "forbidden" };
 
+const isValidPolicyToken = (value) =>
+  typeof value === "string" && String(value).trim().length > 0;
+
 const requirePolicy = (action, resource, ctxBuilder) => async (req, res, next) => {
+  if (!isValidPolicyToken(action) || !isValidPolicyToken(resource)) {
+    return res.status(403).json(FORBIDDEN);
+  }
+
+  if (typeof ctxBuilder !== "undefined" && typeof ctxBuilder !== "function") {
+    return res.status(403).json(FORBIDDEN);
+  }
+
   const ctx = typeof ctxBuilder === "function" ? await ctxBuilder(req) : undefined;
   const result = can(req.user, action, resource, ctx);
   const allowed = await Promise.resolve(result);
 
   if (!allowed) {
-    res.setHeader("X-Policy-Action", action);
-    res.setHeader("X-Policy-Resource", resource);
-    res.setHeader("X-Policy-UserRole", req.user?.role || "");
-    res.setHeader("X-Policy-UserId", req.user?.id || "");
-    res.setHeader("X-Policy-HasCtx", ctx ? "1" : "0");
-    res.setHeader("X-Policy-CtxArtistId", ctx?.artistId || "");
     return res.status(403).json(FORBIDDEN);
   }
 

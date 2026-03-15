@@ -2,6 +2,7 @@ const {
   normalizeArtistAccessSubmissionPayload,
   validateArtistAccessSubmissionPayload,
   normalizeAdminArtistAccessApprovalPayload,
+  validateAdminArtistAccessApprovalPayload,
 } = require("../src/contracts/artistAccessRequest.contract");
 const {
   normalizeCreateOrderPayload,
@@ -40,7 +41,7 @@ describe("workflow contract normalization", () => {
       contactPhone: "+1 (555) 222-3333",
       aboutMe: "Legacy about",
       messageForFans: "Legacy fans",
-      planType: "advanced",
+      requestedPlanType: "advanced",
     });
 
     expect(normalized.dto.artist_name).toBe("Legacy Artist");
@@ -54,7 +55,16 @@ describe("workflow contract normalization", () => {
         "contactPhone",
         "aboutMe",
         "messageForFans",
-        "planType",
+        "requestedPlanType",
+      ])
+    );
+    expect(normalized.meta.deprecations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "contract_alias_used",
+          canonicalKey: "artist_name",
+          aliasKey: "artistName",
+        }),
       ])
     );
   });
@@ -106,6 +116,14 @@ describe("workflow contract normalization", () => {
     expect(normalized.meta.legacyKeys).toEqual(
       expect.arrayContaining(["productId", "productVariantId", "quantity"])
     );
+    expect(normalized.meta.deprecations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          canonicalKey: "items",
+          aliasKey: "single_item_top_level_fields",
+        }),
+      ])
+    );
   });
 
   it("rejects conflicting mixed order shapes", () => {
@@ -126,13 +144,13 @@ describe("workflow contract normalization", () => {
     ).toThrow(/Conflicting payload fields/);
   });
 
-  it("normalizes legacy product variant aliases", () => {
+  it("normalizes scoped snake_case product variant aliases", () => {
     const normalized = normalizePutProductVariantsPayload({
       variants: [
         {
           id: "00000000-0000-4000-8000-000000000001",
           inventory_sku_id: "00000000-0000-4000-8000-000000000010",
-          priceCents: 2100,
+          selling_price_cents: 2100,
           is_listed: true,
         },
       ],
@@ -144,8 +162,42 @@ describe("workflow contract normalization", () => {
     );
     expect(normalized.dto.variants[0].sellingPriceCents).toBe(2100);
     expect(normalized.meta.legacyKeys).toEqual(
-      expect.arrayContaining(["inventory_sku_id", "priceCents", "is_listed"])
+      expect.arrayContaining(["inventory_sku_id", "selling_price_cents", "is_listed"])
     );
+  });
+
+  it("rejects removed artist access alias shapes", () => {
+    const normalized = normalizeArtistAccessSubmissionPayload({
+      artist_name: "Artist",
+      handle: "artist",
+      email: "artist@example.com",
+      phone: "1234567890",
+      planType: "basic",
+    });
+
+    try {
+      validateArtistAccessSubmissionPayload(normalized.dto);
+      throw new Error("expected validation rejection");
+    } catch (error) {
+      expect(error.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: "requested_plan_type" }),
+        ])
+      );
+    }
+  });
+
+  it("rejects removed product variant price alias shapes", () => {
+    const normalized = normalizePutProductVariantsPayload({
+      variants: [
+        {
+          inventory_sku_id: "00000000-0000-4000-8000-000000000010",
+          priceCents: 2100,
+        },
+      ],
+    });
+
+    expect(normalized.dto.variants[0].sellingPriceCents).toBeUndefined();
   });
 
   it("rejects conflicting variant alias values", () => {
@@ -169,6 +221,19 @@ describe("workflow contract normalization", () => {
 
     expect(() => validatePatchInventorySkuPayload(normalized.dto)).toThrow(
       /stock_and_stock_delta_conflict/
+    );
+  });
+
+  it("rejects removed admin artist approval aliases", () => {
+    const normalized = normalizeAdminArtistAccessApprovalPayload({
+      final_plan_type: "basic",
+      payment_mode: "manual",
+      transaction_id: "txn-1",
+      generated_password: "pw",
+    });
+
+    expect(() => validateAdminArtistAccessApprovalPayload(normalized.dto)).toThrow(
+      /password is required/
     );
   });
 });

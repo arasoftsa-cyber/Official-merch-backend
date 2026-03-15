@@ -163,7 +163,7 @@ describe("artist access request submission", () => {
     process.env.PREMIUM_PLAN_ENABLED = "false";
     for (const sample of [
       { field: "requested_plan_type", value: "basic", expected: "basic" },
-      { field: "planType", value: "Advanced", expected: "advanced" },
+      { field: "requestedPlanType", value: "Advanced", expected: "advanced" },
     ]) {
       const { db, state } = createFakeDb();
       const { submitArtistAccessRequest } = loadServiceWithDb(db);

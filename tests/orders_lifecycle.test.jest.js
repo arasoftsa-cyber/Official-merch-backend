@@ -24,18 +24,6 @@ describe("orders lifecycle", () => {
     const { buildOrderItemInsertPayload } = routeModule.__test;
 
     const payload = buildOrderItemInsertPayload({
-      columns: {
-        inventory_sku_id: {},
-        supplier_sku: {},
-        merch_type: {},
-        quality_tier: {},
-        size: {},
-        color: {},
-        selling_price_cents: {},
-        vendor_payout_cents: {},
-        royalty_cents: {},
-        our_share_cents: {},
-      },
       orderId: "00000000-0000-4000-8000-000000000001",
       line: {
         productId: "00000000-0000-4000-8000-000000000010",

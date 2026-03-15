@@ -65,6 +65,27 @@ const normalizeProductStatusValue = (rawValue) => {
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
+const conflictFor = (canonicalKey, aliasKey) => {
+  const err = new Error(
+    `Conflicting payload fields: '${canonicalKey}' and legacy alias '${aliasKey}' both provided with different values.`
+  );
+  err.code = "validation_error";
+  throw err;
+};
+
+const resolveLegacyPair = ({ input, canonicalKey, aliasKey, normalize = (value) => value }) => {
+  const hasCanonical = hasOwn(input, canonicalKey);
+  const hasAlias = hasOwn(input, aliasKey);
+  if (!hasCanonical && !hasAlias) return undefined;
+
+  const canonicalValue = hasCanonical ? normalize(input[canonicalKey]) : undefined;
+  const aliasValue = hasAlias ? normalize(input[aliasKey]) : undefined;
+  if (hasCanonical && hasAlias && canonicalValue !== aliasValue) {
+    conflictFor(canonicalKey, aliasKey);
+  }
+  return hasCanonical ? canonicalValue : aliasValue;
+};
+
 const validateListedVariantPrice = ({ isListed, sellingPriceCents }) => {
   if (!isListed) return true;
   return Number.isInteger(sellingPriceCents) && sellingPriceCents > 0;
@@ -80,9 +101,13 @@ const normalizeVariant = (variant) => {
     return { error: "invalid_variant_id" };
   }
 
-  const hasInventorySkuField =
-    hasOwn(variant, "inventorySkuId") || hasOwn(variant, "inventory_sku_id");
-  const inventorySkuIdRaw = variant.inventorySkuId ?? variant.inventory_sku_id;
+  const inventorySkuIdRaw = resolveLegacyPair({
+    input: variant,
+    canonicalKey: "inventorySkuId",
+    aliasKey: "inventory_sku_id",
+    normalize: (value) => String(value || "").trim(),
+  });
+  const hasInventorySkuField = typeof inventorySkuIdRaw !== "undefined";
   const inventorySkuId = hasInventorySkuField ? asUuidOrNull(inventorySkuIdRaw) : undefined;
   if (hasInventorySkuField && !inventorySkuId) return { error: "invalid_inventory_sku_id" };
 
@@ -91,47 +116,54 @@ const normalizeVariant = (variant) => {
   const sku = String(variant.sku || "").trim() || null;
 
   let sellingPriceCents = undefined;
-  if (
-    typeof variant.priceCents !== "undefined" ||
-    typeof variant.price_cents !== "undefined" ||
-    typeof variant.sellingPriceCents !== "undefined" ||
-    typeof variant.selling_price_cents !== "undefined"
-  ) {
-    sellingPriceCents = parseNonNegativeInt(
-      variant.sellingPriceCents ??
-        variant.selling_price_cents ??
-        variant.priceCents ??
-        variant.price_cents
-    );
+  const sellingPriceRaw = resolveLegacyPair({
+    input: variant,
+    canonicalKey: "sellingPriceCents",
+    aliasKey: "selling_price_cents",
+  });
+  if (typeof sellingPriceRaw !== "undefined") {
+    sellingPriceCents = parseNonNegativeInt(sellingPriceRaw);
     if (sellingPriceCents === null) return { error: "invalid_price" };
   }
 
-  const isListed = parseBooleanMaybe(variant.isListed ?? variant.is_listed);
+  const isListed = parseBooleanMaybe(
+    resolveLegacyPair({
+      input: variant,
+      canonicalKey: "isListed",
+      aliasKey: "is_listed",
+    })
+  );
   if (isListed === null) return { error: "invalid_is_listed" };
 
   const stock =
     typeof variant.stock !== "undefined" ? parseNonNegativeInt(variant.stock) : undefined;
   if (stock === null) return { error: "invalid_stock" };
 
+  const vendorPayoutRaw = resolveLegacyPair({
+    input: variant,
+    canonicalKey: "vendorPayoutCents",
+    aliasKey: "vendor_payout_cents",
+  });
   const vendorPayoutCents =
-    typeof variant.vendorPayoutCents !== "undefined" ||
-    typeof variant.vendor_payout_cents !== "undefined"
-      ? parseNonNegativeInt(variant.vendorPayoutCents ?? variant.vendor_payout_cents)
-      : undefined;
+    typeof vendorPayoutRaw !== "undefined" ? parseNonNegativeInt(vendorPayoutRaw) : undefined;
   if (vendorPayoutCents === null) return { error: "invalid_vendor_payout_cents" };
 
+  const royaltyRaw = resolveLegacyPair({
+    input: variant,
+    canonicalKey: "royaltyCents",
+    aliasKey: "royalty_cents",
+  });
   const royaltyCents =
-    typeof variant.royaltyCents !== "undefined" ||
-    typeof variant.royalty_cents !== "undefined"
-      ? parseNonNegativeInt(variant.royaltyCents ?? variant.royalty_cents)
-      : undefined;
+    typeof royaltyRaw !== "undefined" ? parseNonNegativeInt(royaltyRaw) : undefined;
   if (royaltyCents === null) return { error: "invalid_royalty_cents" };
 
+  const ourShareRaw = resolveLegacyPair({
+    input: variant,
+    canonicalKey: "ourShareCents",
+    aliasKey: "our_share_cents",
+  });
   const ourShareCents =
-    typeof variant.ourShareCents !== "undefined" ||
-    typeof variant.our_share_cents !== "undefined"
-      ? parseNonNegativeInt(variant.ourShareCents ?? variant.our_share_cents)
-      : undefined;
+    typeof ourShareRaw !== "undefined" ? parseNonNegativeInt(ourShareRaw) : undefined;
   if (ourShareCents === null) return { error: "invalid_our_share_cents" };
 
   const shareResolution = resolveOurShareCents({

@@ -3,6 +3,7 @@
 const { createRuntimeEnv } = require("../config/runtimeEnv");
 
 const getRuntime = () => createRuntimeEnv(process.env);
+const isProductionEnv = () => Boolean(getRuntime().flags?.isProduction);
 
 const normalizeBaseUrl = (rawValue) => {
   const value = String(rawValue || "").trim();

@@ -9,37 +9,37 @@ const normalizeVariantDto = (input = {}) => {
   const inventorySkuIdField = resolveAliasedField({
     input,
     canonicalKey: "inventorySkuId",
-    aliases: ["inventory_sku_id"],
+    aliases: [{ key: "inventory_sku_id" }],
     normalize: (value) => String(value || "").trim(),
   });
   const sellingPriceField = resolveAliasedField({
     input,
     canonicalKey: "sellingPriceCents",
-    aliases: ["selling_price_cents", "priceCents", "price_cents"],
+    aliases: [{ key: "selling_price_cents" }],
     normalize: (value) => value,
   });
   const isListedField = resolveAliasedField({
     input,
     canonicalKey: "isListed",
-    aliases: ["is_listed"],
+    aliases: [{ key: "is_listed" }],
     normalize: (value) => value,
   });
   const vendorPayoutField = resolveAliasedField({
     input,
     canonicalKey: "vendorPayoutCents",
-    aliases: ["vendor_payout_cents"],
+    aliases: [{ key: "vendor_payout_cents" }],
     normalize: (value) => value,
   });
   const royaltyField = resolveAliasedField({
     input,
     canonicalKey: "royaltyCents",
-    aliases: ["royalty_cents"],
+    aliases: [{ key: "royalty_cents" }],
     normalize: (value) => value,
   });
   const ourShareField = resolveAliasedField({
     input,
     canonicalKey: "ourShareCents",
-    aliases: ["our_share_cents"],
+    aliases: [{ key: "our_share_cents" }],
     normalize: (value) => value,
   });
 
@@ -65,6 +65,14 @@ const normalizeVariantDto = (input = {}) => {
       ...royaltyField.legacyKeys,
       ...ourShareField.legacyKeys,
     ],
+    deprecations: [
+      ...inventorySkuIdField.deprecations,
+      ...sellingPriceField.deprecations,
+      ...isListedField.deprecations,
+      ...vendorPayoutField.deprecations,
+      ...royaltyField.deprecations,
+      ...ourShareField.deprecations,
+    ],
   };
 };
 
@@ -76,7 +84,10 @@ const normalizePutProductVariantsPayload = (input = {}) => {
   const normalized = body.variants.map((entry) => normalizeVariantDto(entry));
   return {
     dto: { variants: normalized.map((entry) => entry.dto) },
-    meta: { legacyKeys: normalized.flatMap((entry) => entry.legacyKeys) },
+    meta: {
+      legacyKeys: normalized.flatMap((entry) => entry.legacyKeys),
+      deprecations: normalized.flatMap((entry) => entry.deprecations || []),
+    },
   };
 };
 
@@ -150,6 +161,14 @@ const normalizeInventorySkuCreatePayload = (input = {}) => {
         ...supplierCostField.legacyKeys,
         ...mrpField.legacyKeys,
       ],
+      deprecations: [
+        ...supplierSkuField.deprecations,
+        ...merchTypeField.deprecations,
+        ...qualityTierField.deprecations,
+        ...isActiveField.deprecations,
+        ...supplierCostField.deprecations,
+        ...mrpField.deprecations,
+      ],
     },
   };
 };
@@ -172,6 +191,7 @@ const normalizeBulkDeactivateInventorySkusPayload = (input = {}) => {
     },
     meta: {
       legacyKeys: [...merchTypeField.legacyKeys],
+      deprecations: [...merchTypeField.deprecations],
     },
   };
 };
@@ -183,13 +203,13 @@ const normalizePatchInventorySkuPayload = (input = {}) => {
   const stockField = resolveAliasedField({
     input,
     canonicalKey: "stock",
-    aliases: ["stock_cents"],
+    aliases: [],
     normalize: (value) => value,
   });
   const stockDeltaField = resolveAliasedField({
     input,
     canonicalKey: "stockDelta",
-    aliases: ["stock_delta"],
+    aliases: [{ key: "stock_delta" }],
     normalize: (value) => value,
   });
 
@@ -204,6 +224,11 @@ const normalizePatchInventorySkuPayload = (input = {}) => {
         ...base.meta.legacyKeys,
         ...stockField.legacyKeys,
         ...stockDeltaField.legacyKeys,
+      ],
+      deprecations: [
+        ...(base.meta.deprecations || []),
+        ...stockField.deprecations,
+        ...stockDeltaField.deprecations,
       ],
     },
   };

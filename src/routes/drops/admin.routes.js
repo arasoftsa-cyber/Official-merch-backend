@@ -1,5 +1,6 @@
 const registerDropsAdminRoutes = (router, deps) => {
   const {
+    requirePolicy,
     requireAuth,
     rejectLabelMutations,
     isAdminDropsScope,
@@ -17,35 +18,18 @@ const registerDropsAdminRoutes = (router, deps) => {
     normalizeHandle,
   } = deps;
 
-  const requireAdminDropsScope = (req, res, next) => {
+  const routeAdminDropsScope = (req, _res, next) => {
     if (!isAdminDropsScope(req)) {
-      return res.status(404).json({ error: "not_found" });
+      return next("route");
     }
     return next();
   };
 
-  const requireAdminRole = (req, res, next) => {
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-    return next();
-  };
+  const requireAdminDropsRead = requirePolicy("admin_dashboard:read", "drops");
+  const requireAdminDropsWrite = requirePolicy("admin_dashboard:write", "drops");
 
-  router.get("/:id/products", async (req, res, next) => {
+  router.get("/:id/products", routeAdminDropsScope, requireAuth, requireAdminDropsRead, async (req, res, next) => {
     try {
-      if (!isAdminDropsScope(req)) {
-        return next();
-      }
-      if (!req.user?.id) {
-        return res.status(401).json({ error: "unauthorized" });
-      }
-      if (req.user.role !== "admin") {
-        return res.status(403).json({ error: "forbidden" });
-      }
-
       const dropId = String(req.params?.id || "").trim();
       if (!isUuid(dropId)) {
         return res.status(400).json(BAD_REQUEST);
@@ -87,18 +71,8 @@ const registerDropsAdminRoutes = (router, deps) => {
     }
   });
 
-  router.put("/:id/products", requireAuth, async (req, res, next) => {
+  router.put("/:id/products", routeAdminDropsScope, requireAuth, requireAdminDropsWrite, async (req, res, next) => {
     try {
-      if (!isAdminDropsScope(req)) {
-        return next();
-      }
-      if (!req.user?.id) {
-        return res.status(401).json({ error: "unauthorized" });
-      }
-      if (req.user.role !== "admin") {
-        return res.status(403).json({ error: "forbidden" });
-      }
-
       const dropId = String(req.params?.id || "").trim();
       if (!isUuid(dropId)) {
         return res.status(400).json(BAD_REQUEST);
@@ -186,10 +160,10 @@ const registerDropsAdminRoutes = (router, deps) => {
 
   router.post(
     "/:id/hero-image",
+    routeAdminDropsScope,
     requireAuth,
     rejectLabelMutations,
-    requireAdminDropsScope,
-    requireAdminRole,
+    requireAdminDropsWrite,
     parseDropHeroUpload,
     async (req, res, next) => {
       try {
@@ -227,18 +201,8 @@ const registerDropsAdminRoutes = (router, deps) => {
     }
   );
 
-router.patch("/:id", requireAuth, rejectLabelMutations, async (req, res, next) => {
+router.patch("/:id", routeAdminDropsScope, requireAuth, rejectLabelMutations, requireAdminDropsWrite, async (req, res, next) => {
   try {
-    if (!isAdminDropsScope(req)) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    if (!req.user?.id) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "forbidden" });
-    }
-
     const id = String(req.params?.id || "").trim();
     if (!id) {
       return res.status(400).json(BAD_REQUEST);

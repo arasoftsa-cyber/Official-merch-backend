@@ -92,40 +92,42 @@ const validateArtistAccessCheckQuery = (payload = {}) => {
 };
 
 const normalizeArtistAccessSubmissionPayload = (input = {}) => {
+  // Transitional aliases are scoped per workflow and should be removed in the
+  // 2026-Q3 compatibility cleanup once canonical clients are confirmed.
   const artistNameField = resolveAliasedField({
     input,
     canonicalKey: "artist_name",
-    aliases: ["artistName"],
+    aliases: [{ key: "artistName" }],
     normalize: trim,
   });
   const emailField = resolveAliasedField({
     input,
     canonicalKey: "email",
-    aliases: ["contact_email", "contactEmail"],
+    aliases: [{ key: "contactEmail" }],
     normalize: normalizeEmail,
   });
   const phoneField = resolveAliasedField({
     input,
     canonicalKey: "phone",
-    aliases: ["contact_phone", "contactPhone"],
+    aliases: [{ key: "contactPhone" }],
     normalize: normalizePhoneDigits,
   });
   const aboutField = resolveAliasedField({
     input,
     canonicalKey: "about",
-    aliases: ["about_me", "aboutMe", "pitch"],
+    aliases: [{ key: "aboutMe" }],
     normalize: trim,
   });
   const messageForFansField = resolveAliasedField({
     input,
     canonicalKey: "message_for_fans",
-    aliases: ["messageForFans", "fan_message"],
+    aliases: [{ key: "messageForFans" }],
     normalize: trim,
   });
   const requestedPlanTypeField = resolveAliasedField({
     input,
     canonicalKey: "requested_plan_type",
-    aliases: ["planType", "requestedPlanType"],
+    aliases: [{ key: "requestedPlanType" }],
     normalize: normalizePlan,
   });
 
@@ -154,6 +156,14 @@ const normalizeArtistAccessSubmissionPayload = (input = {}) => {
         ...aboutField.legacyKeys,
         ...messageForFansField.legacyKeys,
         ...requestedPlanTypeField.legacyKeys,
+      ],
+      deprecations: [
+        ...artistNameField.deprecations,
+        ...emailField.deprecations,
+        ...phoneField.deprecations,
+        ...aboutField.deprecations,
+        ...messageForFansField.deprecations,
+        ...requestedPlanTypeField.deprecations,
       ],
     },
   };
@@ -222,25 +232,25 @@ const normalizeAdminArtistAccessApprovalPayload = (input = {}) => {
   const finalPlanTypeField = resolveAliasedField({
     input,
     canonicalKey: "final_plan_type",
-    aliases: ["finalPlanType", "approved_plan_type"],
+    aliases: [{ key: "finalPlanType" }],
     normalize: normalizePlan,
   });
   const paymentModeField = resolveAliasedField({
     input,
     canonicalKey: "payment_mode",
-    aliases: ["paymentMode"],
+    aliases: [{ key: "paymentMode" }],
     normalize: (value) => trim(value).toLowerCase(),
   });
   const transactionIdField = resolveAliasedField({
     input,
     canonicalKey: "transaction_id",
-    aliases: ["transactionId"],
+    aliases: [{ key: "transactionId" }],
     normalize: trim,
   });
   const passwordField = resolveAliasedField({
     input,
     canonicalKey: "password",
-    aliases: ["temp_password", "generated_password"],
+    aliases: [],
     normalize: trim,
   });
 
@@ -257,6 +267,12 @@ const normalizeAdminArtistAccessApprovalPayload = (input = {}) => {
         ...paymentModeField.legacyKeys,
         ...transactionIdField.legacyKeys,
         ...passwordField.legacyKeys,
+      ],
+      deprecations: [
+        ...finalPlanTypeField.deprecations,
+        ...paymentModeField.deprecations,
+        ...transactionIdField.deprecations,
+        ...passwordField.deprecations,
       ],
     },
   };
@@ -281,7 +297,7 @@ const normalizeAdminArtistAccessRejectionPayload = (input = {}) => {
   const commentField = resolveAliasedField({
     input,
     canonicalKey: "comment",
-    aliases: ["rejection_comment", "rejectionComment"],
+    aliases: [],
     normalize: trim,
   });
 
@@ -291,6 +307,7 @@ const normalizeAdminArtistAccessRejectionPayload = (input = {}) => {
     },
     meta: {
       legacyKeys: [...commentField.legacyKeys],
+      deprecations: [...commentField.deprecations],
     },
   };
 };

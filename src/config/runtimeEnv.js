@@ -6,6 +6,9 @@ const {
   canonicalEnvAliasDefinitions,
   resolveCanonicalEnvMap,
 } = require("../core/config/envAliases");
+const {
+  getTrustBoundaryRuntimeSupport,
+} = require("../core/runtime/trustBoundarySupport");
 
 const OIDC_CALLBACK_PATH = "/api/auth/oidc/google/callback";
 const DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173";
@@ -266,6 +269,10 @@ const createRuntimeEnv = (env = process.env) => {
     }
   }
 
+  const trustBoundary = getTrustBoundaryRuntimeSupport(env);
+  errors.push(...trustBoundary.errors);
+  warnings.push(...trustBoundary.warnings);
+
   const originMissing = [];
   if (!frontendOrigin) originMissing.push("frontendOrigin");
   if (!backendBaseUrl) originMissing.push("backendBaseUrl");
@@ -294,6 +301,7 @@ const createRuntimeEnv = (env = process.env) => {
     env: {
       port,
       bodySizeLimit,
+      instanceMode: trustBoundary.instanceMode,
       accessTokenSecret,
       refreshTokenSecret,
       oidcEnabled,
@@ -307,6 +315,7 @@ const createRuntimeEnv = (env = process.env) => {
       backendBaseUrl,
       oidcAppBaseUrl,
     },
+    trustBoundary,
     sources: {
       frontendOrigin: aliasResolution.sources.FRONTEND_ORIGIN,
       backendBaseUrl: aliasResolution.sources.BACKEND_BASE_URL,
@@ -344,6 +353,21 @@ const applyRuntimeEnvCompatibility = (runtimeEnv) => {
 
 const emitRuntimeEnvWarnings = (runtimeEnv, warn = console.warn) => {
   const resolved = runtimeEnv || createRuntimeEnv(process.env);
+  for (const warning of resolved.warnings || []) {
+    const warningKey =
+      typeof warning === "string"
+        ? warning
+        : `${warning.event}:${warning.instanceMode}:${(warning.controls || [])
+            .map((control) => control.id)
+            .join(",")}`;
+    if (emittedRuntimeEnvWarningKeys.has(warningKey)) continue;
+    emittedRuntimeEnvWarningKeys.add(warningKey);
+    if (typeof warning === "string") {
+      warn("[startup.env]", warning);
+      continue;
+    }
+    warn("[startup.runtime]", warning);
+  }
   for (const warning of resolved.aliasWarnings || []) {
     const warningKey = `${warning.event}:${warning.canonicalKey}`;
     if (emittedRuntimeEnvWarningKeys.has(warningKey)) continue;

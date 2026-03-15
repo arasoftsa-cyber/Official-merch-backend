@@ -16,6 +16,50 @@ describe("runtime env contract", () => {
     expect(resolved.ok).toBe(true);
     expect(resolved.origins.frontendOrigin).toBe("http://localhost:5173");
     expect(resolved.origins.backendBaseUrl).toBe("http://localhost:3000");
+    expect(resolved.env.instanceMode).toBe("single");
+    expect(resolved.trustBoundary.sharedStateReady).toBe(false);
+  });
+
+  it("fails clearly when multi-instance mode is declared for process-local trust controls", () => {
+    const resolved = createRuntimeEnv({
+      NODE_ENV: "production",
+      APP_ENV: "production",
+      FRONTEND_ORIGIN: "https://officialmerch.tech",
+      BACKEND_BASE_URL: "https://api.officialmerch.tech",
+      OIDC_APP_BASE_URL: "https://officialmerch.tech",
+      JWT_SECRET: "access-secret",
+      JWT_REFRESH_SECRET: "refresh-secret",
+      OIDC_ENABLED: "false",
+      INSTANCE_MODE: "multi",
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSTANCE_MODE=multi is not supported"),
+      ])
+    );
+  });
+
+  it("fails invalid instance mode values with a readable config error", () => {
+    const resolved = createRuntimeEnv({
+      NODE_ENV: "production",
+      APP_ENV: "production",
+      FRONTEND_ORIGIN: "https://officialmerch.tech",
+      BACKEND_BASE_URL: "https://api.officialmerch.tech",
+      OIDC_APP_BASE_URL: "https://officialmerch.tech",
+      JWT_SECRET: "access-secret",
+      JWT_REFRESH_SECRET: "refresh-secret",
+      OIDC_ENABLED: "false",
+      INSTANCE_MODE: "clustered",
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.errors).toEqual(
+      expect.arrayContaining([
+        'INSTANCE_MODE must be "single" or "multi" when set.',
+      ])
+    );
   });
 
   it("fails production mode when canonical origins are missing", () => {
@@ -206,7 +250,15 @@ describe("runtime env contract", () => {
     emitRuntimeEnvWarnings(resolved, warn);
     emitRuntimeEnvWarnings(resolved, warn);
 
-    expect(warn).toHaveBeenCalledTimes(4);
+    expect(warn).toHaveBeenCalledTimes(5);
+    expect(warn).toHaveBeenCalledWith(
+      "[startup.runtime]",
+      expect.objectContaining({
+        event: "process_local_trust_boundary_controls",
+        instanceMode: "single",
+        sharedStateReady: false,
+      })
+    );
     expect(warn).toHaveBeenCalledWith(
       "[startup.env]",
       expect.objectContaining({

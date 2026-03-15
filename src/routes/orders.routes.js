@@ -1,6 +1,7 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
+const { assertOrderItemSnapshotSchema } = require("../core/db/schemaContract");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { ok, fail } = require("../core/http/errorResponse");
 const rateLimit = require("../core/http/rateLimit");
@@ -111,46 +112,26 @@ const isVariantEffectivelySellable = (variant) => {
   return productActive && variantListed && skuActive && stock > 0;
 };
 
-const getOrderItemColumns = async (trx) => trx("order_items").columnInfo();
-
-const buildOrderItemInsertPayload = ({
-  columns = {},
-  orderId,
-  line,
-  variant,
-  now,
-}) => {
-  const hasColumn = (name) => Object.prototype.hasOwnProperty.call(columns, name);
-  const payload = {
+const buildOrderItemInsertPayload = ({ orderId, line, variant, now }) => ({
     id: randomUUID(),
     order_id: orderId,
     product_id: line.productId,
     product_variant_id: line.productVariantId,
     quantity: line.quantity,
     price_cents: variant.selling_price_cents,
+    inventory_sku_id: variant.inventory_sku_id || null,
+    supplier_sku: variant.supplier_sku || null,
+    merch_type: variant.merch_type || null,
+    quality_tier: variant.quality_tier || null,
+    size: variant.size || null,
+    color: variant.color || null,
+    selling_price_cents: variant.selling_price_cents,
+    vendor_payout_cents:
+      variant.vendor_payout_cents == null ? null : Number(variant.vendor_payout_cents),
+    royalty_cents: variant.royalty_cents == null ? null : Number(variant.royalty_cents),
+    our_share_cents: variant.our_share_cents == null ? null : Number(variant.our_share_cents),
     created_at: now,
-  };
-
-  if (hasColumn("inventory_sku_id")) payload.inventory_sku_id = variant.inventory_sku_id || null;
-  if (hasColumn("supplier_sku")) payload.supplier_sku = variant.supplier_sku || null;
-  if (hasColumn("merch_type")) payload.merch_type = variant.merch_type || null;
-  if (hasColumn("quality_tier")) payload.quality_tier = variant.quality_tier || null;
-  if (hasColumn("size")) payload.size = variant.size || null;
-  if (hasColumn("color")) payload.color = variant.color || null;
-  if (hasColumn("selling_price_cents")) payload.selling_price_cents = variant.selling_price_cents;
-  if (hasColumn("vendor_payout_cents")) {
-    payload.vendor_payout_cents =
-      variant.vendor_payout_cents == null ? null : Number(variant.vendor_payout_cents);
-  }
-  if (hasColumn("royalty_cents")) {
-    payload.royalty_cents = variant.royalty_cents == null ? null : Number(variant.royalty_cents);
-  }
-  if (hasColumn("our_share_cents")) {
-    payload.our_share_cents =
-      variant.our_share_cents == null ? null : Number(variant.our_share_cents);
-  }
-  return payload;
-};
+  });
 
 const fetchVariantForCheckout = async (trx, line) =>
   trx("product_variants as pv")
@@ -522,7 +503,7 @@ registerOrderCreateRoutes(router, {
   rejectIfNotBuyer,
   VALIDATION_ERROR,
   getDb,
-  getOrderItemColumns,
+  assertOrderItemSnapshotSchema,
   reserveInventoryForLine,
   randomUUID,
   buildOrderItemInsertPayload,

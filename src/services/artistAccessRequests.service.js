@@ -9,9 +9,15 @@ const { PLAN_TYPES, assertPlanAllowed } = require("../common/constants");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const HANDLE_RE = /^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/;
-const HTTP_URL_RE = /^https?:\/\//i;
-const PROFILE_PHOTO_FIELDS = new Set(["profile_photo", "profilePhoto"]);
-const MAX_UPLOAD_BYTES = 1024 * 1024;
+const PROFILE_PHOTO_UPLOAD_FIELDS = Object.freeze(["profile_photo", "profilePhoto"]);
+const PROFILE_PHOTO_FIELDS = new Set(PROFILE_PHOTO_UPLOAD_FIELDS);
+const MAX_PROFILE_PHOTO_UPLOAD_BYTES = 1024 * 1024;
+const ALLOWED_PROFILE_PHOTO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const PROFILE_PHOTO_MAGIC_NUMBERS = {
+  "image/jpeg": [0xff, 0xd8, 0xff],
+  "image/png": [0x89, 0x50, 0x4e, 0x47],
+  "image/webp": [0x52, 0x49, 0x46, 0x46],
+};
 const storageProvider = getStorageProvider();
 
 const LIMITS = {
@@ -218,9 +224,28 @@ const mapUniqueViolationToField = (error) => {
   return null;
 };
 
+const isValidProfilePhotoBuffer = (buffer, mimetype) => {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return false;
+  if (buffer.length > MAX_PROFILE_PHOTO_UPLOAD_BYTES) return false;
+
+  const magic = PROFILE_PHOTO_MAGIC_NUMBERS[mimetype];
+  if (!magic) return false;
+
+  for (let i = 0; i < magic.length; i += 1) {
+    if (buffer[i] !== magic[i]) return false;
+  }
+  return true;
+};
+
+const isValidProfilePhotoUpload = (file) => {
+  if (!file) return false;
+  if (!PROFILE_PHOTO_FIELDS.has(file.fieldname)) return false;
+  if (!ALLOWED_PROFILE_PHOTO_MIME_TYPES.has(file.mimetype)) return false;
+  return isValidProfilePhotoBuffer(file.buffer, file.mimetype);
+};
+
 const saveUploadedFile = async (file) => {
-  if (!file || !PROFILE_PHOTO_FIELDS.has(file.fieldname) || !file.buffer?.length) return null;
-  if (file.buffer.length > MAX_UPLOAD_BYTES) return null;
+  if (!isValidProfilePhotoUpload(file)) return null;
 
   const originalExt = path.extname(file.originalname || "").slice(0, 12);
   const ext = /^[.][a-z0-9]+$/i.test(originalExt) ? originalExt : "";
@@ -264,9 +289,17 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
       { field: "profile_photo", message: "profile_photo field name is invalid" },
     ]);
   }
-  if (file && file.buffer?.length > MAX_UPLOAD_BYTES) {
+  if (file && file.buffer?.length > MAX_PROFILE_PHOTO_UPLOAD_BYTES) {
     throw validationError([
-      { field: "profile_photo", message: `profile_photo max size is ${MAX_UPLOAD_BYTES} bytes` },
+      {
+        field: "profile_photo",
+        message: `profile_photo max size is ${MAX_PROFILE_PHOTO_UPLOAD_BYTES} bytes`,
+      },
+    ]);
+  }
+  if (file && !isValidProfilePhotoUpload(file)) {
+    throw validationError([
+      { field: "profile_photo", message: "profile_photo file type is invalid" },
     ]);
   }
 
@@ -442,6 +475,10 @@ const linkRequestProfilePhotoToArtist = async ({ trx, requestId, artistId }) => 
 
 module.exports = {
   trim,
+  PROFILE_PHOTO_UPLOAD_FIELDS,
+  MAX_PROFILE_PHOTO_UPLOAD_BYTES,
+  ALLOWED_PROFILE_PHOTO_MIME_TYPES,
+  isValidProfilePhotoUpload,
   submitArtistAccessRequest,
   checkArtistAccessAvailability,
   copyRequestProfilePhotoToArtist,

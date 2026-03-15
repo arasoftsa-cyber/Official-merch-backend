@@ -11,7 +11,7 @@ const registerOrderCreateRoutes = (router, deps) => {
     rejectIfNotBuyer,
     VALIDATION_ERROR,
     getDb,
-    getOrderItemColumns,
+    assertOrderItemSnapshotSchema,
     reserveInventoryForLine,
     randomUUID,
     buildOrderItemInsertPayload,
@@ -95,16 +95,16 @@ router.post(
         }
 
         const db = getDb();
+        await assertOrderItemSnapshotSchema(db);
         const order = await db.transaction(async (trx) => {
           const now = trx.fn.now();
           let totalCents = 0;
           const details = [];
-          const orderItemColumns = await getOrderItemColumns(trx);
           for (const line of payload.items) {
             const variant = await reserveInventoryForLine({ trx, line, now });
             const linePriceCents = Number(variant.selling_price_cents ?? 0);
             totalCents += linePriceCents * line.quantity;
-            details.push({ line, variant, orderItemColumns });
+            details.push({ line, variant });
           }
           const orderId = randomUUID();
           await trx("orders").insert({
@@ -130,7 +130,6 @@ router.post(
           for (const detail of details) {
             await trx("order_items").insert(
               buildOrderItemInsertPayload({
-                columns: detail.orderItemColumns,
                 orderId,
                 line: detail.line,
                 variant: detail.variant,

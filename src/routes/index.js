@@ -1,5 +1,6 @@
 const express = require("express");
 const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
 const { listAdminLeads } = require("../services/lead.service");
 const router = express.Router();
 
@@ -23,8 +24,6 @@ const homepageRouter = require("./homepage.routes");
 const adminHomepageRouter = require("./homepage.admin.routes");
 const product = require("./productVariants.routes");
 
-const FORBIDDEN = { error: "forbidden" };
-
 const DASHBOARD_META = Object.freeze({
   artist: ["/api/artist/dashboard", "/api/artist/dashboard/orders"],
   label: ["/api/labels/dashboard", "/api/labels/dashboard/orders"],
@@ -35,11 +34,8 @@ const DASHBOARD_META = Object.freeze({
 router.get("/_meta/dashboards", (_req, res) => {
   res.json(DASHBOARD_META);
 });
-router.get("/partner/admin/leads", requireAuth, async (req, res, next) => {
+router.get("/partner/admin/leads", requireAuth, requirePolicy("admin_dashboard:read", "self"), async (_req, res, next) => {
   try {
-    if (req.user?.role !== "admin") {
-      return res.status(403).json(FORBIDDEN);
-    }
     const leads = await listAdminLeads();
     return res.json(leads);
   } catch (err) {

@@ -278,6 +278,10 @@ const startServer = async () => {
       : { loadedFiles: [] };
   console.log("[startup] email config readiness", {
     configured: emailReadiness.configured,
+    ready: emailReadiness.ready,
+    required: emailReadiness.required,
+    blocking: emailReadiness.blocking,
+    status: emailReadiness.status,
     apiKeyPresent: emailReadiness.apiKeyPresent,
     fromEmailPresent: emailReadiness.fromEmailPresent,
     fromNamePresent: emailReadiness.fromNamePresent,
@@ -290,15 +294,24 @@ const startServer = async () => {
     oidcEnabled: validatedRuntimeEnv.env.oidcEnabled,
     oidcRedirectUriConfigured: Boolean(validatedRuntimeEnv.env.oidcRedirectUri),
     storageProvider: configuredStorageProvider,
+    instanceMode: validatedRuntimeEnv.env.instanceMode,
+    trustBoundarySharedStateReady: validatedRuntimeEnv.trustBoundary.sharedStateReady,
+    trustBoundaryControls: validatedRuntimeEnv.trustBoundary.controls.map((control) => control.id),
     configWarnings: validatedRuntimeEnv.warnings,
     originReady: originReadiness.ready,
     originMissing: originReadiness.missing,
   });
   if (!emailReadiness.configured) {
-    console.warn("[startup] transactional email disabled (missing env)", {
-      missingRequired: emailReadiness.missingRequired,
-      missingOptional: emailReadiness.missingOptional,
-    });
+    const logMethod = emailReadiness.required ? "error" : "warn";
+    console[logMethod](
+      emailReadiness.required
+        ? "[startup] transactional email is required but not configured"
+        : "[startup] transactional email remains optional and is not configured",
+      {
+        missingRequired: emailReadiness.missingRequired,
+        missingOptional: emailReadiness.missingOptional,
+      }
+    );
   }
 
   await ensureSeededUserRoles();

@@ -28,13 +28,34 @@ const createContractError = ({ code = "validation_error", message, details } = {
   return err;
 };
 
+const normalizeAliasSpec = (alias, canonicalKey) => {
+  if (typeof alias === "string") {
+    return {
+      key: alias,
+      canonicalKey,
+      removalWindow: "2026-Q3 compatibility cleanup",
+    };
+  }
+  if (alias && typeof alias === "object" && typeof alias.key === "string") {
+    return {
+      key: alias.key,
+      canonicalKey,
+      removalWindow: alias.removalWindow || "2026-Q3 compatibility cleanup",
+    };
+  }
+  return null;
+};
+
 const resolveAliasedField = ({
   input,
   canonicalKey,
   aliases = [],
   normalize = (value) => value,
 }) => {
-  const keys = [canonicalKey, ...aliases];
+  const aliasSpecs = aliases
+    .map((alias) => normalizeAliasSpec(alias, canonicalKey))
+    .filter(Boolean);
+  const keys = [canonicalKey, ...aliasSpecs.map((alias) => alias.key)];
   const presentEntries = keys
     .filter((key) => hasOwn(input, key))
     .map((key) => ({
@@ -43,7 +64,7 @@ const resolveAliasedField = ({
     }));
 
   if (!presentEntries.length) {
-    return { value: undefined, legacyKeys: [] };
+    return { value: undefined, legacyKeys: [], deprecations: [] };
   }
 
   const canonicalEntry = presentEntries.find((entry) => entry.key === canonicalKey) || null;
@@ -65,11 +86,24 @@ const resolveAliasedField = ({
   }
 
   const chosen = canonicalEntry || presentEntries[0];
+  const legacyKeys = presentEntries
+    .filter((entry) => entry.key !== canonicalKey)
+    .map((entry) => entry.key);
   return {
     value: chosen?.value,
-    legacyKeys: presentEntries
-      .filter((entry) => entry.key !== canonicalKey)
-      .map((entry) => entry.key),
+    legacyKeys,
+    deprecations: legacyKeys
+      .map((legacyKey) => {
+        const aliasSpec = aliasSpecs.find((entry) => entry.key === legacyKey);
+        if (!aliasSpec) return null;
+        return {
+          event: "contract_alias_used",
+          canonicalKey,
+          aliasKey: legacyKey,
+          removalWindow: aliasSpec.removalWindow,
+        };
+      })
+      .filter(Boolean),
   };
 };
 

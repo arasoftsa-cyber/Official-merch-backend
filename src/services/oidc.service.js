@@ -5,6 +5,9 @@ const jwt = require("jsonwebtoken");
 const { randomUUID } = require("crypto");
 const { createRuntimeEnv } = require("../config/runtimeEnv");
 const {
+  getProcessLocalTrustBoundaryControl,
+} = require("../core/runtime/trustBoundarySupport");
+const {
   frontendOrigin,
   backendBaseUrl,
   isProduction,
@@ -30,6 +33,7 @@ let oidcConfigCache = null;
 let frontendOidcConfigCache = null;
 const exchangeCodeStore = new Map();
 const consumedExchangeCodeStore = new Map();
+const OIDC_EXCHANGE_CODE_CONTROL = getProcessLocalTrustBoundaryControl("oidc_exchange_codes");
 
 const OIDC_CONTRACT_ERRORS = Object.freeze({
   INVALID_ORIGIN: {
@@ -704,4 +708,5 @@ module.exports = {
   validateReturnTo,
   buildFrontendSuccessRedirect,
   buildFrontendFailureRedirect,
+  OIDC_EXCHANGE_CODE_CONTROL,
 };

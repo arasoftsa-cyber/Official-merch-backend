@@ -110,6 +110,17 @@ const normalizeCreateOrderPayload = (input = {}) => {
       legacyKeys: hasLegacySingleShape
         ? ["productId", "productVariantId", "quantity", ...legacyKeys]
         : legacyKeys,
+      deprecations: hasLegacySingleShape
+        ? [
+            {
+              event: "contract_alias_used",
+              canonicalKey: "items",
+              aliasKey: "single_item_top_level_fields",
+              removalWindow: "2026-Q3 compatibility cleanup",
+            },
+            ...currencyField.deprecations,
+          ]
+        : [...currencyField.deprecations],
     },
   };
 };

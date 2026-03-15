@@ -33,9 +33,8 @@ const registerAdminDashboardRoutes = (router, deps) => {
     handleAdminSummary
   );
 
-  router.get("/leads", requireAuth, async (req, res, next) => {
+  router.get("/leads", requireAuth, requirePolicy("admin_dashboard:read", "self"), async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const leads = await listAdminLeads();
       return res.json(leads);
     } catch (err) {

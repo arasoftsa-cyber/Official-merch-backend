@@ -20,17 +20,33 @@ const getEmailConfig = () => {
   };
 };
 
+const isEmailRequired = (env = process.env) =>
+  /^(1|true|yes|on)$/i.test(String(env.EMAIL_REQUIRED || "").trim());
+
 const getEmailConfigReadiness = () => {
   const config = getEmailConfig();
   const missingRequired = [];
   const missingOptional = [];
+  const required = isEmailRequired();
 
   if (!config.apiKey) missingRequired.push("SENDGRID_API_KEY");
   if (!config.fromEmail) missingRequired.push("SENDGRID_FROM_EMAIL");
   if (!config.fromName) missingOptional.push("SENDGRID_FROM_NAME");
 
+  const configured = missingRequired.length === 0;
+  const ready = configured || !required;
+  const status = configured
+    ? "configured"
+    : required
+    ? "required_not_configured"
+    : "optional_not_configured";
+
   return {
-    configured: missingRequired.length === 0,
+    configured,
+    required,
+    ready,
+    blocking: required && !configured,
+    status,
     apiKeyPresent: Boolean(config.apiKey),
     fromEmailPresent: Boolean(config.fromEmail),
     fromNamePresent: Boolean(config.fromName),
@@ -199,6 +215,7 @@ const sendEmailByTemplate = async ({ templateKey, to, payload, metadata } = {}) 
 module.exports = {
   getEmailConfig,
   getEmailConfigReadiness,
+  isEmailRequired,
   isConfigured,
   sendTransactionalEmail,
   sendEmailByTemplate,

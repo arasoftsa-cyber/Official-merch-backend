@@ -346,6 +346,7 @@ registerDropsListingRoutes(router, {
 });
 
 registerDropsAdminRoutes(router, {
+  requirePolicy,
   requireAuth,
   rejectLabelMutations,
   isAdminDropsScope,

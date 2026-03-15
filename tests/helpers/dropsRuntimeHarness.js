@@ -289,7 +289,7 @@ const authHeadersFor = (role, id = `${role}-user`) => ({
   "x-test-role": role,
 });
 
-const createDropsRuntimeHarness = ({ isUserLinkedToArtist = true } = {}) => {
+const createDropsRuntimeHarness = ({ isUserLinkedToArtist = true, useRealPolicy = false } = {}) => {
   jest.resetModules();
   const state = createDropsState();
   const db = createDropsDb(state);
@@ -309,9 +309,11 @@ const createDropsRuntimeHarness = ({ isUserLinkedToArtist = true } = {}) => {
     },
     attachAuthUser: (_req, _res, next) => next(),
   }));
-  jest.doMock(POLICY_MIDDLEWARE_MODULE_PATH, () => ({
-    requirePolicy: () => (_req, _res, next) => next(),
-  }));
+  if (!useRealPolicy) {
+    jest.doMock(POLICY_MIDDLEWARE_MODULE_PATH, () => ({
+      requirePolicy: () => (_req, _res, next) => next(),
+    }));
+  }
   jest.doMock(OWNERSHIP_MODULE_PATH, () => ({
     isUserLinkedToArtist: jest.fn(async () => Boolean(isUserLinkedToArtist)),
     isLabelLinkedToArtist: jest.fn(async () => true),

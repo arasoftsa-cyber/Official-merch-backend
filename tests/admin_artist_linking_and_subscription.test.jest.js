@@ -1,5 +1,11 @@
 "use strict";
 
+const { __clearSchemaContractCacheForTests } = require("../src/core/db/schemaContract");
+
+beforeEach(() => {
+  __clearSchemaContractCacheForTests();
+});
+
 {
   const path = require("node:path");
 
@@ -455,6 +461,11 @@
           return null;
         },
         async columnInfo() {
+          if (tableName === "artists") {
+            return {
+              id: {},
+            };
+          }
           if (tableName === "artist_subscriptions") {
             return {
               id: {},
@@ -527,6 +538,7 @@
 
   const createFakeDb = ({ subscriptions }) => {
     const state = {
+      artists: [{ id: "artist-1" }],
       subscriptions: subscriptions.map((row) => ({ ...row })),
     };
 
@@ -546,6 +558,12 @@
           return query;
         },
         async first(...cols) {
+          if (tableName === "artists") {
+            const row = state.artists.find((artist) =>
+              Object.entries(ctx.whereObj).every(([key, value]) => artist[key] === value)
+            );
+            return row ? pickColumns(row, cols) : null;
+          }
           if (tableName !== "artist_subscriptions") return null;
           const row = state.subscriptions.find((subscription) => {
             const matchesWhere = Object.entries(ctx.whereObj).every(
@@ -581,6 +599,31 @@
             returning: async () => (updated ? [updated] : []),
           };
         },
+        async columnInfo() {
+          if (tableName === "artists") {
+            return {
+              id: {},
+            };
+          }
+          if (tableName === "artist_subscriptions") {
+            return {
+              id: {},
+              artist_id: {},
+              requested_plan_type: {},
+              approved_plan_type: {},
+              start_date: {},
+              end_date: {},
+              payment_mode: {},
+              transaction_id: {},
+              approved_by_admin_id: {},
+              approved_at: {},
+              status: {},
+              created_at: {},
+              updated_at: {},
+            };
+          }
+          return {};
+        },
       };
 
       return query;
@@ -591,7 +634,8 @@
       now: () => "2026-03-03T12:00:00.000Z",
     };
     db.schema = {
-      hasTable: async (tableName) => tableName === "artist_subscriptions",
+      hasTable: async (tableName) =>
+        tableName === "artists" || tableName === "artist_subscriptions",
     };
 
     return { db, state };
@@ -733,6 +777,32 @@
     message_for_fans: {},
     socials: {},
     profile_photo_url: {},
+    created_at: {},
+  };
+
+  const DIRECTORY_TABLE_COLUMNS = {
+    artist_user_map: { id: {}, artist_id: {}, user_id: {} },
+    users: { id: {}, email: {}, role: {} },
+    artist_access_requests: {
+      handle: {},
+      email: {},
+      phone: {},
+      socials: {},
+      about_me: {},
+      message_for_fans: {},
+      status: {},
+      created_at: {},
+    },
+    entity_media_links: {
+      id: {},
+      media_asset_id: {},
+      entity_type: {},
+      entity_id: {},
+      role: {},
+      sort_order: {},
+      created_at: {},
+    },
+    media_assets: { id: {}, public_url: {} },
   };
 
   const createFakeDb = () => {
@@ -775,7 +845,7 @@
         },
         async columnInfo() {
           if (tableName === "artists") return ARTIST_COLUMNS;
-          return {};
+          return DIRECTORY_TABLE_COLUMNS[tableName] || {};
         },
         async update() {
           return 0;
@@ -796,7 +866,8 @@
 
     const db = (tableName) => makeQuery(tableName);
     db.schema = {
-      hasTable: async () => false,
+      hasTable: async (tableName) =>
+        tableName === "artists" || Object.prototype.hasOwnProperty.call(DIRECTORY_TABLE_COLUMNS, tableName),
     };
     db.transaction = async (handler) => {
       const trx = (tableName) => makeQuery(tableName);
@@ -836,11 +907,11 @@
     return handlers[handlers.length - 1].handle;
   };
 
-  const loadPatchArtistHandler = () => {
+  const loadPatchArtistHandler = (dbFactory = createFakeDb) => {
     let handler = null;
     jest.isolateModules(() => {
       const dbModule = require(DB_MODULE_PATH);
-      dbModule.getDb = () => createFakeDb();
+      dbModule.getDb = () => dbFactory();
       const router = require(ROUTE_MODULE_PATH);
       handler = getPatchArtistHandler(router);
     });
@@ -848,6 +919,32 @@
       throw new Error("PATCH /artists/:id handler failed to load");
     }
     return handler;
+  };
+
+  const createIncompleteSchemaDb = () => {
+    const db = createFakeDb();
+    const originalDb = db;
+    const wrapped = (tableName) => {
+      const query = originalDb(tableName);
+      if (tableName === "artists") {
+        return {
+          ...query,
+          async columnInfo() {
+            return {
+              id: {},
+              name: {},
+              handle: {},
+            };
+          },
+        };
+      }
+      return query;
+    };
+    wrapped.schema = originalDb.schema;
+    wrapped.transaction = originalDb.transaction;
+    wrapped.fn = originalDb.fn;
+    wrapped.raw = originalDb.raw;
+    return wrapped;
   };
 
   describe("admin artist patch route", () => {
@@ -868,6 +965,24 @@
 
       expect(res.statusCode).toBe(400);
       expect(res.body).toEqual({ error: "no_fields" });
+    });
+
+    it("fails clearly when the admin artist schema contract is missing", async () => {
+      const handler = loadPatchArtistHandler(createIncompleteSchemaDb);
+      const req = {
+        params: { id: "00000000-0000-4000-8000-000000000001" },
+        body: { name: "Updated Name" },
+        user: { role: "admin", id: "admin-id" },
+      };
+      const res = createMockResponse();
+
+      await handler(req, res, () => null);
+
+      expect(res.statusCode).toBe(500);
+      expect(res.body).toEqual({
+        error: "schema_not_ready",
+        message: "Required database migrations have not been applied.",
+      });
     });
   });
 }

@@ -1,6 +1,10 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../../../core/db/db");
+const {
+  assertAdminArtistDirectorySchema,
+  assertAdminArtistSubscriptionSchema,
+} = require("../../../core/db/schemaContract");
 const { requireAuth } = require("../../../core/http/auth.middleware");
 const { requirePolicy } = require("../../../core/http/policy.middleware");
 const { toAbsolutePublicUrl } = require("../../../utils/publicUrl");
@@ -273,16 +277,16 @@ const normalizeSocialRows = (value) => {
   return [];
 };
 
-const fetchAdminArtistDetailPayload = async (db, artistId) => {
-  const hasArtistsTable = await db.schema.hasTable("artists");
-  if (!hasArtistsTable) {
-    return {
-      statusCode: 404,
-      body: { error: "not_found", message: "Artist not found" },
-    };
-  }
+const isSchemaContractMissingError = (err) => err?.code === "SCHEMA_CONTRACT_MISSING";
 
-  const artistColumns = await db("artists").columnInfo();
+const sendSchemaNotReady = (res) =>
+  res.status(500).json({
+    error: "schema_not_ready",
+    message: "Required database migrations have not been applied.",
+  });
+
+const fetchAdminArtistDetailPayload = async (db, artistId) => {
+  await assertAdminArtistDirectorySchema(db);
   const artist = await db("artists").where({ id: artistId }).first();
   if (!artist) {
     return {
@@ -291,111 +295,54 @@ const fetchAdminArtistDetailPayload = async (db, artistId) => {
     };
   }
 
-  let email = null;
-  const hasArtistUserMap = await db.schema.hasTable("artist_user_map");
-  const hasUsersTable = await db.schema.hasTable("users");
-  if (hasArtistUserMap && hasUsersTable) {
-    const linkedUser = await db("artist_user_map as aum")
-      .leftJoin("users as u", "u.id", "aum.user_id")
-      .where("aum.artist_id", artistId)
-      .select("u.email")
-      .first();
-    email = normalizeEmailOrNull(linkedUser?.email);
-  }
+  const linkedUser = await db("artist_user_map as aum")
+    .leftJoin("users as u", "u.id", "aum.user_id")
+    .where("aum.artist_id", artistId)
+    .select("u.email")
+    .first();
+  const email = normalizeEmailOrNull(artist.email) || normalizeEmailOrNull(linkedUser?.email);
 
-  if (
-    !email &&
-    hasUsersTable &&
-    Object.prototype.hasOwnProperty.call(artistColumns, "user_id") &&
-    artist?.user_id
-  ) {
-    const linkedUser = await db("users")
-      .where({ id: artist.user_id })
-      .select("email")
-      .first();
-    email = normalizeEmailOrNull(linkedUser?.email);
-  }
+  const latestApprovedRequest = await db("artist_access_requests")
+    .where("status", "approved")
+    .whereRaw("lower(trim(handle)) = lower(trim(?))", [artist.handle])
+    .orderBy("created_at", "desc")
+    .first();
 
-  let latestApprovedRequest = null;
-  const hasRequestsTable = await db.schema.hasTable("artist_access_requests");
-  if (hasRequestsTable) {
-    const requestColumns = await db("artist_access_requests").columnInfo();
-    const requestQuery = db("artist_access_requests").where("status", "approved");
-    if (Object.prototype.hasOwnProperty.call(requestColumns, "handle") && artist.handle) {
-      requestQuery.whereRaw("lower(trim(handle)) = lower(trim(?))", [artist.handle]);
-    } else if (Object.prototype.hasOwnProperty.call(requestColumns, "email") && email) {
-      requestQuery.whereRaw("lower(trim(email)) = lower(trim(?))", [email]);
-    }
-    latestApprovedRequest = await requestQuery.orderBy("created_at", "desc").first();
-  }
-
-  let profilePhotoUrl = "";
-  const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
-  const hasMediaAssets = await db.schema.hasTable("media_assets");
-  if (hasEntityMediaLinks && hasMediaAssets) {
-    const mediaRow = await db("entity_media_links as eml")
-      .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
-      .where("eml.entity_type", "artist")
-      .andWhere("eml.role", "profile_photo")
-      .andWhere("eml.entity_id", artistId)
-      .orderBy("eml.sort_order", "asc")
-      .select("ma.public_url")
-      .first();
-    profilePhotoUrl = toAbsolutePublicUrl(mediaRow?.public_url);
-  }
-  if (!profilePhotoUrl && Object.prototype.hasOwnProperty.call(artistColumns, "profile_photo_url")) {
-    profilePhotoUrl = toAbsolutePublicUrl(artist.profile_photo_url);
-  }
+  const mediaRow = await db("entity_media_links as eml")
+    .leftJoin("media_assets as ma", "ma.id", "eml.media_asset_id")
+    .where("eml.entity_type", "artist")
+    .andWhere("eml.role", "profile_photo")
+    .andWhere("eml.entity_id", artistId)
+    .orderBy("eml.sort_order", "asc")
+    .select("ma.public_url")
+    .first();
+  const profilePhotoUrl =
+    toAbsolutePublicUrl(mediaRow?.public_url) || toAbsolutePublicUrl(artist.profile_photo_url);
 
   const status =
     String(artist.status ?? latestApprovedRequest?.status ?? "active").trim().toLowerCase() ||
     "active";
-  const isFeatured = Object.prototype.hasOwnProperty.call(artistColumns, "is_featured")
-    ? Boolean(artist.is_featured)
-    : false;
-
-  const phone = Object.prototype.hasOwnProperty.call(artistColumns, "phone")
-    ? String(artist.phone ?? "").trim()
-    : String(latestApprovedRequest?.phone ?? latestApprovedRequest?.contact_phone ?? "").trim();
-
-  const aboutMe = Object.prototype.hasOwnProperty.call(artistColumns, "about_me")
-    ? String(artist.about_me ?? "").trim()
-    : String(latestApprovedRequest?.about_me ?? latestApprovedRequest?.pitch ?? "").trim();
-
-  const messageForFans = Object.prototype.hasOwnProperty.call(
-    artistColumns,
-    "message_for_fans"
-  )
-    ? String(artist.message_for_fans ?? "").trim()
-    : String(latestApprovedRequest?.message_for_fans ?? "").trim();
-
-  const socials = Object.prototype.hasOwnProperty.call(artistColumns, "socials")
-    ? artist.socials ?? []
-    : latestApprovedRequest?.socials ?? [];
+  const isFeatured = Boolean(artist.is_featured);
+  const phone = String(artist.phone ?? latestApprovedRequest?.phone ?? "").trim();
+  const aboutMe = String(artist.about_me ?? latestApprovedRequest?.about_me ?? "").trim();
+  const messageForFans = String(
+    artist.message_for_fans ?? latestApprovedRequest?.message_for_fans ?? ""
+  ).trim();
+  const socials = artist.socials ?? latestApprovedRequest?.socials ?? [];
   const normalizedSocials = normalizeSocialRows(socials);
 
   const capabilities = {
-    canEditName:
-      Object.prototype.hasOwnProperty.call(artistColumns, "name") ||
-      Object.prototype.hasOwnProperty.call(artistColumns, "artist_name"),
-    canEditHandle: Object.prototype.hasOwnProperty.call(artistColumns, "handle"),
-    canEditEmail:
-      Object.prototype.hasOwnProperty.call(artistColumns, "email") ||
-      (hasArtistUserMap && hasUsersTable),
-    canEditStatus: Object.prototype.hasOwnProperty.call(artistColumns, "status"),
-    canEditFeatured: Object.prototype.hasOwnProperty.call(artistColumns, "is_featured"),
-    canEditPhone:
-      Object.prototype.hasOwnProperty.call(artistColumns, "phone") || hasRequestsTable,
-    canEditAboutMe: Object.prototype.hasOwnProperty.call(artistColumns, "about_me"),
-    canEditMessageForFans: Object.prototype.hasOwnProperty.call(artistColumns, "message_for_fans"),
-    canEditSocials: Object.prototype.hasOwnProperty.call(artistColumns, "socials"),
-    canEditProfilePhoto:
-      Object.prototype.hasOwnProperty.call(artistColumns, "profile_photo_url") ||
-      (hasEntityMediaLinks && hasMediaAssets),
-    canUploadProfilePhoto:
-      hasMediaAssets &&
-      (Object.prototype.hasOwnProperty.call(artistColumns, "profile_photo_url") ||
-        hasEntityMediaLinks),
+    canEditName: true,
+    canEditHandle: true,
+    canEditEmail: true,
+    canEditStatus: true,
+    canEditFeatured: true,
+    canEditPhone: true,
+    canEditAboutMe: true,
+    canEditMessageForFans: true,
+    canEditSocials: true,
+    canEditProfilePhoto: true,
+    canUploadProfilePhoto: true,
   };
 
   return {
@@ -461,14 +408,7 @@ const formatSubscriptionPayload = (row, fallbackArtistId = "") => {
 };
 
 const fetchActiveArtistSubscriptionPayload = async (db, artistId) => {
-  const hasArtistsTable = await db.schema.hasTable("artists");
-  if (!hasArtistsTable) {
-    return {
-      statusCode: 404,
-      body: { error: "not_found", message: "Artist not found" },
-    };
-  }
-
+  await assertAdminArtistSubscriptionSchema(db);
   const artist = await db("artists").where({ id: artistId }).first("id");
   if (!artist?.id) {
     return {
@@ -477,26 +417,14 @@ const fetchActiveArtistSubscriptionPayload = async (db, artistId) => {
     };
   }
 
-  const hasSubscriptionsTable = await db.schema.hasTable("artist_subscriptions");
-  if (!hasSubscriptionsTable) {
-    return {
-      statusCode: 200,
-      body: null,
-    };
-  }
-
-  const subscriptionColumns = await db("artist_subscriptions").columnInfo();
-  let query = db("artist_subscriptions").where({
-    artist_id: artistId,
-    status: "active",
-  });
-  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "approved_at")) {
-    query = query.orderBy("approved_at", "desc");
-  }
-  if (Object.prototype.hasOwnProperty.call(subscriptionColumns, "created_at")) {
-    query = query.orderBy("created_at", "desc");
-  }
-  const active = await query.first();
+  const active = await db("artist_subscriptions")
+    .where({
+      artist_id: artistId,
+      status: "active",
+    })
+    .orderBy("approved_at", "desc")
+    .orderBy("created_at", "desc")
+    .first();
 
   return {
     statusCode: 200,
@@ -513,14 +441,7 @@ const updateArtistSubscriptionAction = async ({ db, subscriptionId, payload = {}
     };
   }
 
-  const hasSubscriptionsTable = await db.schema.hasTable("artist_subscriptions");
-  if (!hasSubscriptionsTable) {
-    return {
-      statusCode: 404,
-      body: { error: "not_found", message: "Subscription not found" },
-    };
-  }
-
+  await assertAdminArtistSubscriptionSchema(db);
   const existing = await db("artist_subscriptions").where({ id: subscriptionIdText }).first();
   if (!existing?.id) {
     return {
@@ -726,25 +647,23 @@ router.get("/artists", requireAuth, async (req, res) => {
     if (!ensureAdmin(req, res)) return;
     const db = getDb();
     const artistColumns = await db("artists").columnInfo();
-    const hasArtistColumn = (name) => Object.prototype.hasOwnProperty.call(artistColumns, name);
-
-    const selectColumns = ["id"];
-    if (hasArtistColumn("name")) selectColumns.push("name");
-    if (hasArtistColumn("artist_name")) selectColumns.push("artist_name");
-    if (hasArtistColumn("handle")) selectColumns.push("handle");
-    if (hasArtistColumn("status")) selectColumns.push("status");
-    if (hasArtistColumn("email")) selectColumns.push("email");
-    if (hasArtistColumn("phone")) selectColumns.push("phone");
-    if (hasArtistColumn("is_featured")) selectColumns.push("is_featured");
-    if (hasArtistColumn("created_at")) selectColumns.push("created_at");
-
-    let query = db("artists").select(selectColumns).limit(200);
-    if (hasArtistColumn("created_at")) {
-      query = query.orderBy("created_at", "desc");
-    } else {
-      query = query.orderBy("id", "desc");
+    const artistSelects = ["id", "name", "handle", "created_at"];
+    if (Object.prototype.hasOwnProperty.call(artistColumns, "status")) {
+      artistSelects.push("status");
     }
-    const rows = await query;
+    if (Object.prototype.hasOwnProperty.call(artistColumns, "email")) {
+      artistSelects.push("email");
+    }
+    if (Object.prototype.hasOwnProperty.call(artistColumns, "phone")) {
+      artistSelects.push("phone");
+    }
+    if (Object.prototype.hasOwnProperty.call(artistColumns, "is_featured")) {
+      artistSelects.push("is_featured");
+    }
+    const rows = await db("artists")
+      .select(artistSelects)
+      .orderBy("created_at", "desc")
+      .limit(200);
 
     const artistIds = rows.map((row) => row.id).filter(Boolean);
     const linkedUsersCountByArtistId = new Map();
@@ -752,9 +671,7 @@ router.get("/artists", requireAuth, async (req, res) => {
     const normalizeText = (value) => String(value ?? "").trim();
     const normalizeLower = (value) => normalizeText(value).toLowerCase();
 
-    const hasArtistUserMap = await db.schema.hasTable("artist_user_map");
-    const hasUsersTable = await db.schema.hasTable("users");
-    if (hasArtistUserMap && hasUsersTable && artistIds.length > 0) {
+    if (artistIds.length > 0) {
       const linkedRows = await db("artist_user_map as aum")
         .leftJoin("users as u", "u.id", "aum.user_id")
         .whereIn("aum.artist_id", artistIds)
@@ -779,72 +696,44 @@ router.get("/artists", requireAuth, async (req, res) => {
 
     const requestStatusByArtistId = new Map();
     const requestPhoneByArtistId = new Map();
-    const hasRequestsTable = await db.schema.hasTable("artist_access_requests");
-    if (hasRequestsTable && artistIds.length > 0) {
-      const requestColumns = await db("artist_access_requests").columnInfo();
-      const hasRequestColumn = (name) => Object.prototype.hasOwnProperty.call(requestColumns, name);
+    if (artistIds.length > 0) {
+      const requestRows = await db("artist_access_requests")
+        .select("handle", "email", "status", "phone", "created_at")
+        .orderBy("created_at", "desc");
 
-      const canMatchByHandle = hasRequestColumn("handle");
-      const canMatchByEmail = hasRequestColumn("email") || hasRequestColumn("contact_email");
-      const canUseStatus = hasRequestColumn("status");
-      const hasCreatedAt = hasRequestColumn("created_at");
-      const hasPhone = hasRequestColumn("phone") || hasRequestColumn("contact_phone");
-
-      if ((canMatchByHandle || canMatchByEmail) && (canUseStatus || hasPhone)) {
-        const selectRequestColumns = [];
-        if (canMatchByHandle) selectRequestColumns.push("handle");
-        if (hasRequestColumn("email")) selectRequestColumns.push("email");
-        if (hasRequestColumn("contact_email")) selectRequestColumns.push("contact_email");
-        if (canUseStatus) selectRequestColumns.push("status");
-        if (hasRequestColumn("phone")) selectRequestColumns.push("phone");
-        if (hasRequestColumn("contact_phone")) selectRequestColumns.push("contact_phone");
-        if (hasCreatedAt) selectRequestColumns.push("created_at");
-
-        let requestQuery = db("artist_access_requests").select(selectRequestColumns);
-        if (hasCreatedAt) {
-          requestQuery = requestQuery.orderBy("created_at", "desc");
+      const artistIdsByHandle = new Map();
+      const artistIdsByEmail = new Map();
+      for (const row of rows) {
+        const rowHandle = normalizeLower(row?.handle);
+        const rowEmail = normalizeLower(row?.email || linkedEmailByArtistId.get(row?.id));
+        if (rowHandle && !artistIdsByHandle.has(rowHandle)) {
+          artistIdsByHandle.set(rowHandle, row.id);
         }
-        const requestRows = await requestQuery;
+        if (rowEmail && !artistIdsByEmail.has(rowEmail)) {
+          artistIdsByEmail.set(rowEmail, row.id);
+        }
+      }
 
-        const artistIdsByHandle = new Map();
-        const artistIdsByEmail = new Map();
-        for (const row of rows) {
-          const rowHandle = normalizeLower(row?.handle);
-          const rowEmail = normalizeLower(row?.email || linkedEmailByArtistId.get(row?.id));
-          if (rowHandle && !artistIdsByHandle.has(rowHandle)) {
-            artistIdsByHandle.set(rowHandle, row.id);
-          }
-          if (rowEmail && !artistIdsByEmail.has(rowEmail)) {
-            artistIdsByEmail.set(rowEmail, row.id);
+      for (const requestRow of requestRows) {
+        let matchedArtistId = null;
+        const handleKey = normalizeLower(requestRow?.handle);
+        if (handleKey && artistIdsByHandle.has(handleKey)) {
+          matchedArtistId = artistIdsByHandle.get(handleKey);
+        }
+        if (!matchedArtistId) {
+          const emailKey = normalizeLower(requestRow?.email);
+          if (emailKey && artistIdsByEmail.has(emailKey)) {
+            matchedArtistId = artistIdsByEmail.get(emailKey);
           }
         }
+        if (!matchedArtistId) continue;
 
-        for (const requestRow of requestRows) {
-          let matchedArtistId = null;
-          if (canMatchByHandle) {
-            const key = normalizeLower(requestRow?.handle);
-            if (key && artistIdsByHandle.has(key)) {
-              matchedArtistId = artistIdsByHandle.get(key);
-            }
-          }
-          if (!matchedArtistId && canMatchByEmail) {
-            const key = normalizeLower(requestRow?.email || requestRow?.contact_email);
-            if (key && artistIdsByEmail.has(key)) {
-              matchedArtistId = artistIdsByEmail.get(key);
-            }
-          }
-          if (!matchedArtistId) continue;
-
-          if (canUseStatus && !requestStatusByArtistId.has(matchedArtistId)) {
-            requestStatusByArtistId.set(
-              matchedArtistId,
-              normalizeRequestStatus(requestRow?.status)
-            );
-          }
-          if (hasPhone && !requestPhoneByArtistId.has(matchedArtistId)) {
-            const phone = normalizeText(requestRow?.phone || requestRow?.contact_phone);
-            if (phone) requestPhoneByArtistId.set(matchedArtistId, phone);
-          }
+        if (!requestStatusByArtistId.has(matchedArtistId)) {
+          requestStatusByArtistId.set(matchedArtistId, normalizeRequestStatus(requestRow?.status));
+        }
+        if (!requestPhoneByArtistId.has(matchedArtistId)) {
+          const phone = normalizeText(requestRow?.phone);
+          if (phone) requestPhoneByArtistId.set(matchedArtistId, phone);
         }
       }
     }
@@ -886,6 +775,9 @@ router.get("/artists/:artistId/subscription", requireAuth, async (req, res) => {
     const subscriptionPayload = await fetchActiveArtistSubscriptionPayload(db, artistId);
     return res.status(subscriptionPayload.statusCode).json(subscriptionPayload.body);
   } catch (err) {
+    if (isSchemaContractMissingError(err)) {
+      return sendSchemaNotReady(res);
+    }
     console.error("[admin artist subscription] error", err);
     return res.status(500).json({ error: "internal_server_error" });
   }
@@ -917,6 +809,9 @@ router.patch("/artist-subscriptions/:subscriptionId", requireAuth, async (req, r
         message: "Artist already has another active subscription",
       });
     }
+    if (isSchemaContractMissingError(err)) {
+      return sendSchemaNotReady(res);
+    }
     console.error("[admin artist subscription patch] error", err);
     return res.status(500).json({ error: "internal_server_error" });
   }
@@ -933,6 +828,9 @@ router.get("/artists/:id", requireAuth, async (req, res) => {
     const detail = await fetchAdminArtistDetailPayload(db, artistId);
     return res.status(detail.statusCode).json(detail.body);
   } catch (err) {
+    if (isSchemaContractMissingError(err)) {
+      return sendSchemaNotReady(res);
+    }
     console.error("[admin artist detail] error", err);
     return res.status(500).json({ error: "internal_server_error" });
   }
@@ -948,13 +846,12 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
 
     const payload = req.body || {};
     const db = getDb();
+    await assertAdminArtistDirectorySchema(db);
     const artist = await db("artists").where({ id: artistId }).first();
     if (!artist) {
       return res.status(404).json({ error: "not_found", message: "Artist not found" });
     }
 
-    const artistColumns = await db("artists").columnInfo();
-    const hasArtistColumn = (name) => Object.prototype.hasOwnProperty.call(artistColumns, name);
     const hasPayloadKey = (key) => Object.prototype.hasOwnProperty.call(payload, key);
     const asText = (value) => String(value ?? "").trim();
     const asNullableText = (value) => {
@@ -990,12 +887,6 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
     const ignoredFields = [];
 
     if (hasPayloadKey("is_featured") || hasPayloadKey("isFeatured")) {
-      if (!hasArtistColumn("is_featured")) {
-        return res.status(400).json({
-          error: "validation",
-          details: [{ field: "is_featured", message: "is_featured is not editable on this deployment" }],
-        });
-      }
       const rawFeatured = hasPayloadKey("is_featured")
         ? payload.is_featured
         : payload.isFeatured;
@@ -1010,12 +901,6 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
     }
 
     if (hasPayloadKey("name")) {
-      if (!(hasArtistColumn("name") || hasArtistColumn("artist_name"))) {
-        return res.status(400).json({
-          error: "validation",
-          details: [{ field: "name", message: "name is not editable on this deployment" }],
-        });
-      }
       const name = asText(payload.name);
       if (name.length < 2) {
         return res.status(400).json({
@@ -1023,18 +908,11 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
           details: [{ field: "name", message: "name must be at least 2 characters" }],
         });
       }
-      if (hasArtistColumn("name")) patch.name = name;
-      if (hasArtistColumn("artist_name")) patch.artist_name = name;
+      patch.name = name;
       hasAnyUpdate = true;
     }
 
     if (hasPayloadKey("handle")) {
-      if (!hasArtistColumn("handle")) {
-        return res.status(400).json({
-          error: "validation",
-          details: [{ field: "handle", message: "handle is not editable on this deployment" }],
-        });
-      }
       const handle = asText(payload.handle).replace(/^@+/, "");
       if (!handle) {
         return res.status(400).json({
@@ -1058,12 +936,6 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
     }
 
     if (hasPayloadKey("status")) {
-      if (!hasArtistColumn("status")) {
-        return res.status(400).json({
-          error: "validation",
-          details: [{ field: "status", message: "status is not editable on this deployment" }],
-        });
-      }
       const status = normalizeArtistStatusInput(payload.status);
       if (!status) {
         return res.status(400).json({
@@ -1075,30 +947,24 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
       hasAnyUpdate = true;
     }
 
-    if (hasPayloadKey("phone") && hasArtistColumn("phone")) {
+    if (hasPayloadKey("phone")) {
       patch.phone = asNullableText(payload.phone);
       hasAnyUpdate = true;
     }
 
-    if (
-      (hasPayloadKey("about") || hasPayloadKey("about_me") || hasPayloadKey("aboutMe")) &&
-      hasArtistColumn("about_me")
-    ) {
+    if (hasPayloadKey("about") || hasPayloadKey("about_me") || hasPayloadKey("aboutMe")) {
       patch.about_me = asNullableText(payload.about ?? payload.about_me ?? payload.aboutMe);
       hasAnyUpdate = true;
     }
 
-    if (
-      (hasPayloadKey("message_for_fans") || hasPayloadKey("messageForFans")) &&
-      hasArtistColumn("message_for_fans")
-    ) {
+    if (hasPayloadKey("message_for_fans") || hasPayloadKey("messageForFans")) {
       patch.message_for_fans = asNullableText(
         payload.message_for_fans ?? payload.messageForFans
       );
       hasAnyUpdate = true;
     }
 
-    if (hasPayloadKey("socials") && hasArtistColumn("socials")) {
+    if (hasPayloadKey("socials")) {
       const rawSocials = payload.socials;
       const parsedSocials =
         typeof rawSocials === "string"
@@ -1155,22 +1021,13 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
       hasPayloadKey("profilePhotoUrl") ||
       hasPayloadKey("profile_photo_media_asset_id") ||
       hasPayloadKey("profilePhotoMediaAssetId");
-    const hasArtistUserMap = await db.schema.hasTable("artist_user_map");
-    const hasUsersTable = await db.schema.hasTable("users");
-    const canUpdateEmailInArtist = hasArtistColumn("email");
-    const canUpdateEmailInUsers = hasArtistUserMap && hasUsersTable;
-    if (emailProvided && !canUpdateEmailInArtist && !canUpdateEmailInUsers) {
-      ignoredFields.push("email");
-    }
-    const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
-    const hasMediaAssets = await db.schema.hasTable("media_assets");
 
     await db.transaction(async (trx) => {
       if (Object.keys(patch).length > 0) {
         await trx("artists").where({ id: artistId }).update(patch);
       }
 
-      if (emailProvided && (canUpdateEmailInArtist || canUpdateEmailInUsers)) {
+      if (emailProvided) {
         const nextEmailRaw = asText(payload.email).toLowerCase();
         if (nextEmailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmailRaw)) {
           throw Object.assign(new Error("validation"), {
@@ -1182,12 +1039,10 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
           });
         }
 
-        if (canUpdateEmailInArtist) {
-          await trx("artists").where({ id: artistId }).update({ email: nextEmailRaw || null });
-          hasAnyUpdate = true;
-        }
+        await trx("artists").where({ id: artistId }).update({ email: nextEmailRaw || null });
+        hasAnyUpdate = true;
 
-        if (nextEmailRaw && canUpdateEmailInUsers) {
+        if (nextEmailRaw) {
           const linked = await trx("artist_user_map")
             .where({ artist_id: artistId })
             .select("user_id")
@@ -1195,8 +1050,6 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
           if (linked?.user_id) {
             await trx("users").where({ id: linked.user_id }).update({ email: nextEmailRaw });
             hasAnyUpdate = true;
-          } else if (!canUpdateEmailInArtist) {
-            ignoredFields.push("email");
           }
         }
       }
@@ -1208,43 +1061,39 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
           payload.profile_photo_media_asset_id ?? payload.profilePhotoMediaAssetId
         );
 
-        if (hasArtistColumn("profile_photo_url")) {
-          await trx("artists")
-            .where({ id: artistId })
-            .update({ profile_photo_url: requestedUrl || null });
-          hasAnyUpdate = true;
+        await trx("artists")
+          .where({ id: artistId })
+          .update({ profile_photo_url: requestedUrl || null });
+        hasAnyUpdate = true;
+
+        await trx("entity_media_links")
+          .where({
+            entity_type: "artist",
+            entity_id: artistId,
+            role: "profile_photo",
+          })
+          .delete();
+        hasAnyUpdate = true;
+
+        let mediaAssetId = requestedMediaAssetId || "";
+        if (!mediaAssetId && requestedUrl) {
+          const mediaRow = await trx("media_assets")
+            .select("id")
+            .whereIn("public_url", [requestedUrlRaw, requestedUrl])
+            .first();
+          mediaAssetId = String(mediaRow?.id || "").trim();
         }
 
-        if (hasEntityMediaLinks) {
-          await trx("entity_media_links")
-            .where({
-              entity_type: "artist",
-              entity_id: artistId,
-              role: "profile_photo",
-            })
-            .delete();
-          hasAnyUpdate = true;
-
-          let mediaAssetId = requestedMediaAssetId || "";
-          if (!mediaAssetId && requestedUrl && hasMediaAssets) {
-            const mediaRow = await trx("media_assets")
-              .select("id")
-              .whereIn("public_url", [requestedUrlRaw, requestedUrl])
-              .first();
-            mediaAssetId = String(mediaRow?.id || "").trim();
-          }
-
-          if (mediaAssetId) {
-            await trx("entity_media_links").insert({
-              id: randomUUID(),
-              media_asset_id: mediaAssetId,
-              entity_type: "artist",
-              entity_id: artistId,
-              role: "profile_photo",
-              sort_order: 0,
-              created_at: trx.fn.now(),
-            });
-          }
+        if (mediaAssetId) {
+          await trx("entity_media_links").insert({
+            id: randomUUID(),
+            media_asset_id: mediaAssetId,
+            entity_type: "artist",
+            entity_id: artistId,
+            role: "profile_photo",
+            sort_order: 0,
+            created_at: trx.fn.now(),
+          });
         }
       }
     });
@@ -1266,6 +1115,9 @@ router.patch("/artists/:id", requireAuth, async (req, res) => {
       ...(ignoredFields.length > 0 ? { ignoredFields: Array.from(new Set(ignoredFields)) } : {}),
     });
   } catch (err) {
+    if (isSchemaContractMissingError(err)) {
+      return sendSchemaNotReady(res);
+    }
     if (err?.statusCode && err?.payload) {
       return res.status(err.statusCode).json(err.payload);
     }
