@@ -41,6 +41,7 @@ const createFakeDb = (options = {}) => {
       email: "approve-test@example.com",
       phone: "1234567890",
       requested_plan_type: options.requestedPlanType || "advanced",
+      requestor_user_id: options.requestorUserId || null,
       created_at: nowIso,
       updated_at: nowIso,
     },
@@ -55,6 +56,11 @@ const createFakeDb = (options = {}) => {
     artists: [],
     artistUserMap: [],
     labelArtistMap: [],
+    labelUsersMap:
+      options.labelUsersMap ||
+      (options.requestorUserId && options.labelId
+        ? [{ user_id: options.requestorUserId, label_id: options.labelId }]
+        : []),
     artistSubscriptions: options.existingActiveSubscription
       ? [
           {
@@ -69,7 +75,18 @@ const createFakeDb = (options = {}) => {
 
   const normalizeKey = (key) => String(key || "").split(".").pop();
   const hasTable = (tableName) =>
-    !["entity_media_links", "media_assets"].includes(String(tableName || ""));
+    [
+      "artist_access_requests",
+      "artist_subscriptions",
+      "artist_user_map",
+      "label_artist_map",
+      "label_users_map",
+      "artists",
+      "users",
+      "auth_refresh_tokens",
+      "entity_media_links",
+      "media_assets",
+    ].includes(String(tableName || ""));
 
   const makeQuery = (rawTableName) => {
     const tableName = String(rawTableName || "").split(/\s+as\s+/i)[0].trim();
@@ -124,6 +141,8 @@ const createFakeDb = (options = {}) => {
         rows = state.artistUserMap.slice();
       } else if (tableName === "label_artist_map") {
         rows = state.labelArtistMap.slice();
+      } else if (tableName === "label_users_map") {
+        rows = state.labelUsersMap.slice();
       } else if (tableName === "artists") {
         rows = state.artists.slice();
       } else if (tableName === "users") {
@@ -226,6 +245,13 @@ const createFakeDb = (options = {}) => {
         if (tableName === "artist_access_requests") {
           return {
             id: {},
+            artist_name: {},
+            handle: {},
+            email: {},
+            phone: {},
+            socials: {},
+            about_me: {},
+            message_for_fans: {},
             status: {},
             requested_plan_type: {},
             approved_plan_type: {},
@@ -249,6 +275,7 @@ const createFakeDb = (options = {}) => {
             about_me: {},
             message_for_fans: {},
             socials: {},
+            profile_photo_url: {},
           };
         }
         if (tableName === "artist_subscriptions") {
@@ -266,6 +293,30 @@ const createFakeDb = (options = {}) => {
             status: {},
             created_at: {},
             updated_at: {},
+          };
+        }
+        if (tableName === "users") {
+          return {
+            id: {},
+            email: {},
+            role: {},
+          };
+        }
+        if (tableName === "entity_media_links") {
+          return {
+            id: {},
+            media_asset_id: {},
+            entity_type: {},
+            entity_id: {},
+            role: {},
+            sort_order: {},
+            created_at: {},
+          };
+        }
+        if (tableName === "media_assets") {
+          return {
+            id: {},
+            public_url: {},
           };
         }
         return {};
@@ -479,6 +530,8 @@ describe("artist access request admin review", () => {
     expect(response.body?.total).toBe(1);
     expect(response.body.items[0]?.id).toBe(REQUEST_ID);
     expect(response.body.items[0]?.requested_plan_type).toBe("advanced");
+    expect(response.body.items[0]).not.toHaveProperty("labelId");
+    expect(response.body.items[0]).not.toHaveProperty("label_id");
   });
 
   it("approved requestor can log in via partner portal", async () => {
@@ -589,6 +642,30 @@ describe("artist access request admin review", () => {
     expect(state.artistUserMap.length).toBe(1);
     const valid = await verifyPassword("AdminSet123!", state.users[0].password_hash);
     expect(valid).toBe(true);
+  }, 20000);
+
+  it("approving a label-submitted request links the new artist via requestor_user_id", async () => {
+    const { db, state } = createFakeDb({
+      requestedPlanType: "basic",
+      labelId: "label-1",
+      requestorUserId: "label-user-1",
+    });
+    const approveArtistRequestAction = loadActionWithDb(db);
+
+    const approval = await approveArtistRequestAction({
+      id: REQUEST_ID,
+      adminId: ADMIN_ID,
+      body: {
+        final_plan_type: "basic",
+        password: "AdminSet123!",
+      },
+    });
+
+    expect(approval.httpStatus).toBe(200);
+    expect(state.labelArtistMap.length).toBe(1);
+    expect(state.labelArtistMap[0].label_id).toBe("label-1");
+    expect(state.labelArtistMap[0].artist_id).toBeTruthy();
+    expect(state.request.requestor_user_id).toBe("label-user-1");
   }, 20000);
 
   it("approving premium while disabled returns 400", async () => {

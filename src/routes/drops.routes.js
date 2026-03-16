@@ -2,6 +2,10 @@ const express = require("express");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
+const {
+  assertEntityMediaReadSchema,
+  resolveDropWriteCompatibilitySchema,
+} = require("../core/db/schemaContract");
 const { requireAuth } = require("../core/http/auth.middleware");
 const { requirePolicy } = require("../core/http/policy.middleware");
 const { createMultipartUploadMiddleware } = require("../middleware/uploadMultipart");
@@ -87,12 +91,12 @@ const loadCoverUrlMap = async (entityType, entityIds) => {
   }
 
   try {
-    const hasMediaAssets = await db.schema.hasTable("media_assets");
-    const hasEntityLinks = await db.schema.hasTable("entity_media_links");
-    if (!hasMediaAssets || !hasEntityLinks) {
-      return new Map();
-    }
+    await assertEntityMediaReadSchema(db);
+  } catch (_error) {
+    return new Map();
+  }
 
+  try {
     const rows = await db("entity_media_links as eml")
       .join("media_assets as ma", "ma.id", "eml.media_asset_id")
       .select("eml.entity_id as entityId", "ma.public_url as publicUrl", "eml.role")
@@ -116,8 +120,8 @@ const loadCoverUrlMap = async (entityType, entityIds) => {
 };
 
 const syncDropHeroImageUrlColumn = async (trx, dropId, heroUrl) => {
-  const hasColumn = await trx.schema.hasColumn("drops", "hero_image_url");
-  if (!hasColumn) return;
+  const { hasLegacyHeroImageUrl } = await resolveDropWriteCompatibilitySchema(trx);
+  if (!hasLegacyHeroImageUrl) return;
 
   await trx("drops").where({ id: dropId }).update({
     hero_image_url: heroUrl || null,

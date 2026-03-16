@@ -165,9 +165,6 @@ const processApproval = async ({ id, adminId, approvalPayload }) => {
     if (Object.prototype.hasOwnProperty.call(requestColumns, "updated_at")) {
       updates.updated_at = trx.fn.now();
     }
-    if (Object.prototype.hasOwnProperty.call(requestColumns, "requestor_user_id")) {
-      updates.requestor_user_id = user.id;
-    }
     if (Object.prototype.hasOwnProperty.call(requestColumns, "rejection_comment")) {
       updates.rejection_comment = null;
     }

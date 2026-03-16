@@ -444,6 +444,10 @@ const updateProductOperation = async ({ user, id, payload }) => {
     return makeHttpError(400, { error: "no_fields" });
   }
 
+  if (hasProductFields && hasColumn("updated_at")) {
+    patch.updated_at = db.fn.now();
+  }
+
   const productReturningFields = ["id", "title", "description", "is_active as isActive"];
   if (hasColumn("status")) productReturningFields.push("status");
   if (hasColumn("rejection_reason")) {

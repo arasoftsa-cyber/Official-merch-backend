@@ -1,15 +1,17 @@
 const registerAdminPaymentRoutes = (router, deps) => {
   const {
     requireAuth,
-    ensureAdmin,
+    requirePolicy,
     getDb,
     PAYMENT_NOT_FOUND,
     listFlags,
   } = deps;
 
-  router.get("/payments", requireAuth, async (req, res, next) => {
+  const requireAdminPaymentsRead = requirePolicy("admin_dashboard:read", "payments");
+  const requireAdminAbuseFlagsRead = requirePolicy("admin_dashboard:read", "abuse_flags");
+
+  router.get("/payments", requireAuth, requireAdminPaymentsRead, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const status = req.query.status;
       let limit = parseInt(req.query.limit, 10);
@@ -58,9 +60,12 @@ const registerAdminPaymentRoutes = (router, deps) => {
     }
   });
 
-  router.get("/payments/:paymentId/events", requireAuth, async (req, res, next) => {
+  router.get(
+    "/payments/:paymentId/events",
+    requireAuth,
+    requireAdminPaymentsRead,
+    async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const paymentId = req.params.paymentId;
       if (!paymentId) {
@@ -96,9 +101,8 @@ const registerAdminPaymentRoutes = (router, deps) => {
     }
   });
 
-  router.get("/abuse-flags", requireAuth, async (req, res, next) => {
+  router.get("/abuse-flags", requireAuth, requireAdminAbuseFlagsRead, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       res.json({
         items: listFlags(),
       });

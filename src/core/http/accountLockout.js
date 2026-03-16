@@ -1,3 +1,5 @@
+// Process-local only. Startup runtime validation blocks INSTANCE_MODE=multi until
+// these counters are backed by a shared coordination layer.
 const failedAttempts = new Map();
 const {
   getProcessLocalTrustBoundaryControl,

@@ -18,6 +18,10 @@ const createFakeDb = () => {
   const state = {
     touchedTables: [],
     insertedRequests: [],
+    schemaCounters: {
+      hasTable: {},
+      columnInfo: {},
+    },
   };
 
   const createQuery = (tableName) => {
@@ -29,23 +33,45 @@ const createFakeDb = () => {
         return query;
       },
       first: async () => null,
-      columnInfo: async () => ({
-        id: {},
-        artist_name: {},
-        handle: {},
-        email: {},
-        phone: {},
-        socials: {},
-        about_me: {},
-        message_for_fans: {},
-        contact_email: {},
-        contact_phone: {},
-        pitch: {},
-        status: {},
-        created_at: {},
-        updated_at: {},
-        requested_plan_type: {},
-      }),
+      columnInfo: async () => {
+        state.schemaCounters.columnInfo[tableName] =
+          (state.schemaCounters.columnInfo[tableName] || 0) + 1;
+        if (tableName === "artist_access_requests") {
+          return {
+            id: {},
+            artist_name: {},
+            handle: {},
+            email: {},
+            phone: {},
+            socials: {},
+            about_me: {},
+            message_for_fans: {},
+            contact_email: {},
+            contact_phone: {},
+            pitch: {},
+            status: {},
+            created_at: {},
+            updated_at: {},
+            requested_plan_type: {},
+            requestor_user_id: {},
+            profile_photo_path: {},
+            profile_photo_url: {},
+          };
+        }
+        if (tableName === "artists") {
+          return {
+            id: {},
+            handle: {},
+          };
+        }
+        if (tableName === "users") {
+          return {
+            id: {},
+            email: {},
+          };
+        }
+        return {};
+      },
       update: async () => 1,
       insert(payload) {
         state.touchedTables.push(tableName);
@@ -67,7 +93,11 @@ const createFakeDb = () => {
 
   const db = (tableName) => createQuery(tableName);
   db.schema = {
-    hasTable: async (tableName) => tableName === "artist_access_requests",
+    hasTable: async (tableName) => {
+      state.schemaCounters.hasTable[tableName] =
+        (state.schemaCounters.hasTable[tableName] || 0) + 1;
+      return ["artist_access_requests", "artists", "users"].includes(tableName);
+    },
   };
   db.fn = {
     now: () => "2026-03-03T00:00:00.000Z",
@@ -78,6 +108,7 @@ const createFakeDb = () => {
       now: () => "2026-03-03T00:00:00.000Z",
     };
     trx.raw = (sql, bindings) => ({ sql, bindings });
+    trx.schema = db.schema;
     return cb(trx);
   };
 
@@ -177,6 +208,71 @@ describe("artist access request submission", () => {
       expect(state.touchedTables.includes("leads")).toBe(false);
       expect(state.touchedTables.includes("artist_subscriptions")).toBe(false);
     }
+  });
+
+  it("ignores raw client label identifiers without trusted session context", async () => {
+    process.env.PREMIUM_PLAN_ENABLED = "false";
+    const { db, state } = createFakeDb();
+    const { submitArtistAccessRequest } = loadServiceWithDb(db);
+
+    await submitArtistAccessRequest({
+      rawBody: buildValidRawBody({
+        requested_plan_type: "basic",
+        label_id: "label-client-1",
+      }),
+    });
+
+    expect(state.insertedRequests.length).toBe(1);
+    expect(state.insertedRequests[0]).not.toHaveProperty("label_id");
+    expect(state.insertedRequests[0]).not.toHaveProperty("requestor_user_id");
+  });
+
+  it("stores only trusted requester context from the authenticated session", async () => {
+    process.env.PREMIUM_PLAN_ENABLED = "false";
+    const { db, state } = createFakeDb();
+    const { submitArtistAccessRequest } = loadServiceWithDb(db);
+
+    await submitArtistAccessRequest({
+      rawBody: buildValidRawBody({
+        requested_plan_type: "advanced",
+        label_id: "label-client-ignored",
+      }),
+      trustedContext: {
+        requestorUserId: "label-user-1",
+      },
+    });
+
+    expect(state.insertedRequests.length).toBe(1);
+    expect(state.insertedRequests[0].requestor_user_id).toBe("label-user-1");
+    expect(state.insertedRequests[0]).not.toHaveProperty("label_id");
+  });
+
+  it("reuses the cached artist access request contract across submissions", async () => {
+    process.env.PREMIUM_PLAN_ENABLED = "false";
+    const { db, state } = createFakeDb();
+    const { submitArtistAccessRequest } = loadServiceWithDb(db);
+
+    await submitArtistAccessRequest({
+      rawBody: buildValidRawBody({
+        handle: "plan-test-artist-one",
+        email: "artist-one@example.com",
+        requested_plan_type: "basic",
+      }),
+    });
+    await submitArtistAccessRequest({
+      rawBody: buildValidRawBody({
+        handle: "plan-test-artist-two",
+        email: "artist-two@example.com",
+        requested_plan_type: "advanced",
+      }),
+    });
+
+    expect(state.schemaCounters.hasTable.artist_access_requests).toBe(1);
+    expect(state.schemaCounters.columnInfo.artist_access_requests).toBe(1);
+    expect(state.schemaCounters.hasTable.artists).toBe(1);
+    expect(state.schemaCounters.columnInfo.artists).toBe(1);
+    expect(state.schemaCounters.hasTable.users).toBe(1);
+    expect(state.schemaCounters.columnInfo.users).toBe(1);
   });
 });
 

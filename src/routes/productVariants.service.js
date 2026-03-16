@@ -19,13 +19,7 @@ const {
   normalizeVariant,
   validateUniqueInventorySkuMappings,
 } = require("./productVariants.validators");
-
-const ensureAdminAccess = async (req, res, next) => {
-  if (req.user?.role !== "admin") {
-    return res.status(403).json({ error: "forbidden" });
-  }
-  return next();
-};
+const { assertCatalogProductMutationSchema } = require("../core/db/schemaContract");
 
 const putProductVariantsWorkflow = async ({ db, productId, variantsPayload = [] }) => {
   const normalized = [];
@@ -43,11 +37,11 @@ const putProductVariantsWorkflow = async ({ db, productId, variantsPayload = [] 
 
   const created = await db.transaction(async (trx) => {
     const touchedVariantIds = [];
-    const [productColumns, variantColumns, skuColumns] = await Promise.all([
-      trx("products").columnInfo(),
-      trx("product_variants").columnInfo(),
-      trx("inventory_skus").columnInfo(),
-    ]);
+    const {
+      productColumns,
+      variantColumns,
+      inventorySkuColumns: skuColumns,
+    } = await assertCatalogProductMutationSchema(trx);
     const hasProductColumn = (name) => Object.prototype.hasOwnProperty.call(productColumns, name);
     const hasVariantColumn = (name) => Object.prototype.hasOwnProperty.call(variantColumns, name);
     const hasSkuColumn = (name) => Object.prototype.hasOwnProperty.call(skuColumns, name);
@@ -526,7 +520,6 @@ const patchInventorySkuResponse = async ({ db, skuId, payload }) => {
 };
 
 module.exports = {
-  ensureAdminAccess,
   findProductById,
   findVariantById,
   deleteVariantById,

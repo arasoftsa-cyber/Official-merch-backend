@@ -6,6 +6,11 @@ const {
   slugifyHandle,
   trim,
 } = require("./artistAccessRequests.admin.validators");
+const {
+  assertArtistAccessRequestAdminSchema,
+  assertArtistAccessRequestMediaSchema,
+  assertAdminArtistSubscriptionSchema,
+} = require("../core/db/schemaContract");
 
 const pad2 = (value) => String(value).padStart(2, "0");
 const toLocalDateString = (value) =>
@@ -28,9 +33,10 @@ const getRequestById = async (trx, id) => trx("artist_access_requests").where({ 
 const updateRequestById = async (trx, id, updates) =>
   trx("artist_access_requests").where({ id }).update(updates);
 
-const getRequestColumns = async (trx) => trx("artist_access_requests").columnInfo();
+const getRequestColumns = async (trx) =>
+  (await assertArtistAccessRequestAdminSchema(trx)).requestColumns;
 
-const getArtistColumns = async (trx) => trx("artists").columnInfo();
+const getArtistColumns = async (trx) => (await assertArtistAccessRequestAdminSchema(trx)).artistColumns;
 
 const findUserByEmail = async (trx, email) =>
   trx("users")
@@ -70,6 +76,16 @@ const ensureUniqueHandle = async (trx, base) => {
     candidate = `${base}-${suffix}`;
   }
   return candidate;
+};
+
+const resolveLabelIdForRequestor = async (trx, requestorUserId) => {
+  const normalizedRequestorUserId = trim(requestorUserId);
+  if (!normalizedRequestorUserId) return null;
+
+  const row = await trx("label_users_map")
+    .where({ user_id: normalizedRequestorUserId })
+    .first("label_id");
+  return row?.label_id || null;
 };
 
 const createArtistFromRequest = async ({ trx, request, userId }) => {
@@ -142,7 +158,10 @@ const createArtistFromRequest = async ({ trx, request, userId }) => {
     .onConflict(["artist_id", "user_id"])
     .ignore();
 
-  const labelIdCandidate = request.label_id || request.labelId || null;
+  const labelIdCandidate = await resolveLabelIdForRequestor(
+    trx,
+    request.requestor_user_id || request.requestorUserId || null
+  );
   if (labelIdCandidate) {
     await trx("label_artist_map")
       .insert({
@@ -173,7 +192,9 @@ const createArtistSubscription = async ({
 
   const { startDate, endDate } = getSubscriptionDateWindow();
   const now = trx.fn.now();
-  const subscriptionColumns = await trx("artist_subscriptions").columnInfo();
+  const { artist_subscriptions: subscriptionColumns } = await assertAdminArtistSubscriptionSchema(
+    trx
+  );
   const subscriptionInsert = {
     artist_id: artistId,
     requested_plan_type: normalizeRequestedPlanType(request),
@@ -203,9 +224,9 @@ const createArtistSubscription = async ({
 };
 
 const listRequests = async ({ db, status, page, pageSize }) => {
-  const requestColumnInfo = await db("artist_access_requests").columnInfo();
-  const hasEntityMediaLinks = await db.schema.hasTable("entity_media_links");
-  const hasMediaAssets = await db.schema.hasTable("media_assets");
+  const requestSchema = await assertArtistAccessRequestAdminSchema(db);
+  await assertArtistAccessRequestMediaSchema(db);
+  const requestColumnInfo = requestSchema.requestColumns;
   const offset = (page - 1) * pageSize;
   const [{ total = 0 } = {}] = await db("artist_access_requests")
     .where("status", status)
@@ -223,16 +244,14 @@ const listRequests = async ({ db, status, page, pageSize }) => {
     .offset(offset)
     .select(baseSelections);
 
-  if (hasEntityMediaLinks && hasMediaAssets) {
-    rowsQuery
-      .leftJoin("entity_media_links", function () {
-        this.on("entity_media_links.entity_id", "=", "artist_access_requests.id")
-          .andOnVal("entity_media_links.entity_type", "=", "artist_access_request")
-          .andOnVal("entity_media_links.role", "=", "profile_photo");
-      })
-      .leftJoin("media_assets", "media_assets.id", "entity_media_links.media_asset_id")
-      .select("media_assets.public_url as profile_photo_media_url");
-  }
+  rowsQuery
+    .leftJoin("entity_media_links", function () {
+      this.on("entity_media_links.entity_id", "=", "artist_access_requests.id")
+        .andOnVal("entity_media_links.entity_type", "=", "artist_access_request")
+        .andOnVal("entity_media_links.role", "=", "profile_photo");
+    })
+    .leftJoin("media_assets", "media_assets.id", "entity_media_links.media_asset_id")
+    .select("media_assets.public_url as profile_photo_media_url");
 
   const rows = await rowsQuery;
   return { rows, total: Number(total) };

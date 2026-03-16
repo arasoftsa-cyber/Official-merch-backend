@@ -2,15 +2,15 @@ const registerAdminDashboardRoutes = (router, deps) => {
   const {
     requireAuth,
     requirePolicy,
-    ensureAdmin,
     listAdminLeads,
     getDb,
     formatDashboardSummary,
   } = deps;
 
+  const requireAdminDashboardRead = requirePolicy("admin_dashboard:read", "dashboard");
+
   const handleAdminSummary = async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const summary = await formatDashboardSummary(db);
       res.json(summary);
@@ -22,18 +22,18 @@ const registerAdminDashboardRoutes = (router, deps) => {
   router.get(
     "/dashboard/summary",
     requireAuth,
-    requirePolicy("admin_dashboard:read", "self"),
+    requireAdminDashboardRead,
     handleAdminSummary
   );
 
   router.get(
     "/metrics",
     requireAuth,
-    requirePolicy("admin_dashboard:read", "self"),
+    requireAdminDashboardRead,
     handleAdminSummary
   );
 
-  router.get("/leads", requireAuth, requirePolicy("admin_dashboard:read", "self"), async (req, res, next) => {
+  router.get("/leads", requireAuth, requireAdminDashboardRead, async (req, res, next) => {
     try {
       const leads = await listAdminLeads();
       return res.json(leads);

@@ -33,14 +33,22 @@ const buildPayload = () => ({
   requested_plan_type: "basic",
 });
 
-const createRouteHarness = () => {
+const createRouteHarness = (options = {}) => {
   const submitArtistAccessRequest = jest.fn().mockResolvedValue({
     request_id: "request-1",
     created_at: "2026-03-15T00:00:00.000Z",
   });
   const checkArtistAccessAvailability = jest.fn();
+  const resolveLabelIdForUser =
+    options.resolveLabelIdForUser || jest.fn().mockResolvedValue(options.labelId || null);
 
   jest.resetModules();
+  jest.doMock("../src/core/db/db.js", () => ({
+    getDb: () => ({ scope: "artist-access-request-route-test" }),
+  }));
+  jest.doMock("../src/services/labels-dashboard.service.js", () => ({
+    resolveLabelIdForUser,
+  }));
   jest.doMock("../src/services/artistAccessRequests.service.js", () => {
     const actual = jest.requireActual("../src/services/artistAccessRequests.service.js");
     return {
@@ -53,10 +61,16 @@ const createRouteHarness = () => {
   const router = require(ARTIST_ACCESS_ROUTE_MODULE_PATH);
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    if (options.user) {
+      req.user = options.user;
+    }
+    next();
+  });
   app.use("/api/artist-access-requests", router);
   app.use((err, _req, res, _next) => res.status(500).json({ error: "internal_server_error" }));
 
-  return { app, submitArtistAccessRequest };
+  return { app, submitArtistAccessRequest, resolveLabelIdForUser };
 };
 
 describe("artist access request upload hardening", () => {
@@ -273,5 +287,49 @@ describe("artist access request upload hardening", () => {
       }),
       file: null,
     });
+  });
+
+  it("stores only the trusted requester context after validating the authenticated label session", async () => {
+    const { app, submitArtistAccessRequest, resolveLabelIdForUser } = createRouteHarness({
+      user: { id: "label-user-1", role: "label" },
+      labelId: "label-1",
+    });
+
+    const response = await request(app)
+      .post("/api/artist-access-requests")
+      .send(buildPayload());
+
+    expect(response.status).toBe(201);
+    expect(resolveLabelIdForUser).toHaveBeenCalledWith(
+      expect.any(Object),
+      "label-user-1"
+    );
+    expect(submitArtistAccessRequest).toHaveBeenCalledWith({
+      rawBody: expect.objectContaining({
+        artist_name: "Upload Artist",
+      }),
+      file: null,
+      trustedContext: {
+        requestorUserId: "label-user-1",
+      },
+    });
+  });
+
+  it("rejects label-authenticated submissions when no trusted label mapping exists", async () => {
+    const { app, submitArtistAccessRequest } = createRouteHarness({
+      user: { id: "label-user-2", role: "label" },
+      labelId: null,
+    });
+
+    const response = await request(app)
+      .post("/api/artist-access-requests")
+      .send(buildPayload());
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: "forbidden",
+      message: "authenticated label context unavailable",
+    });
+    expect(submitArtistAccessRequest).not.toHaveBeenCalled();
   });
 });

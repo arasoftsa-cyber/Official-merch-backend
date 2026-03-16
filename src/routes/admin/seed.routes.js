@@ -2,9 +2,9 @@ const registerAdminSeedRoutes = (router, deps) => {
   const {
     REGISTER_TEST_SEED_ROUTES,
     requireAuth,
+    requirePolicy,
     express,
     TEST_SEEDS_ENABLED,
-    ensureAdmin,
     MAX_SEEDED_ORDERS,
     getDb,
     ensureArtistForSeed,
@@ -15,15 +15,17 @@ const registerAdminSeedRoutes = (router, deps) => {
 
   if (!REGISTER_TEST_SEED_ROUTES) return;
 
+  const requireAdminTestSupportWrite = requirePolicy("admin_dashboard:write", "test_support");
+
   router.post(
     "/test/seed-orders",
     requireAuth,
+    requireAdminTestSupportWrite,
     express.json(),
     async (req, res, next) => {
       if (!TEST_SEEDS_ENABLED) {
         return res.status(404).json({ error: "not_found" });
       }
-      if (!ensureAdmin(req, res)) return;
       try {
         const body = req.body || {};
         const requestedPlaced = Number(body.placedCount ?? 15);

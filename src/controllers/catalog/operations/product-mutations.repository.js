@@ -21,6 +21,7 @@ const {
   PRODUCT_STATUS_REJECTED,
   normalizeProductStatusFromRecord,
 } = require("../status");
+const { assertCatalogProductMutationSchema } = require("../../../core/db/schemaContract");
 
 const DEFAULT_VARIANT_SKU = "DEFAULT";
 
@@ -45,10 +46,7 @@ const createNewMerchProductTx = async (trx, input) => {
     return { validationError: { field: "artist_id", message: "artist_id does not exist" } };
   }
 
-  const [productColumns, variantColumns] = await Promise.all([
-    trx("products").columnInfo(),
-    trx("product_variants").columnInfo(),
-  ]);
+  const { productColumns, variantColumns } = await assertCatalogProductMutationSchema(trx);
   const hasVariantColumn = (name) =>
     Object.prototype.hasOwnProperty.call(variantColumns, name);
   const insertPayload = {
@@ -58,6 +56,9 @@ const createNewMerchProductTx = async (trx, input) => {
     is_active: false,
     created_at: trx.fn.now(),
   };
+  if (Object.prototype.hasOwnProperty.call(productColumns, "updated_at")) {
+    insertPayload.updated_at = trx.fn.now();
+  }
 
   if (Object.prototype.hasOwnProperty.call(productColumns, "merch_story")) {
     insertPayload.merch_story = merchStory;
@@ -196,11 +197,11 @@ const createStandardProductTx = async (trx, input) => {
     inventorySkuIdFromPayload,
   } = input;
 
-  const [productColumns, variantColumns, skuColumns] = await Promise.all([
-    trx("products").columnInfo(),
-    trx("product_variants").columnInfo(),
-    trx("inventory_skus").columnInfo(),
-  ]);
+  const {
+    productColumns,
+    variantColumns,
+    inventorySkuColumns: skuColumns,
+  } = await assertCatalogProductMutationSchema(trx);
   const hasProductColumn = (name) =>
     Object.prototype.hasOwnProperty.call(productColumns, name);
   const hasVariantColumn = (name) =>
@@ -214,6 +215,9 @@ const createStandardProductTx = async (trx, input) => {
     is_active: isActiveFlag,
     created_at: trx.fn.now(),
   };
+  if (hasProductColumn("updated_at")) {
+    productInsert.updated_at = trx.fn.now();
+  }
   if (hasProductColumn("status")) {
     productInsert.status = resolvedStatus;
   }
@@ -452,7 +456,7 @@ const createStandardProductTx = async (trx, input) => {
 };
 
 const attachListingPhotosToProductTx = async (trx, { productId, files }) => {
-  const productColumns = await trx("products").columnInfo();
+  const { productColumns } = await assertCatalogProductMutationSchema(trx);
   const listingPhotoUrls = await saveProductListingPhotos({
     trx,
     productId,
@@ -483,8 +487,10 @@ const findOwnedProduct = (db, { id, artistId }) =>
     .where({ id, artist_id: artistId })
     .first();
 
-const loadProductColumns = (db) => db("products").columnInfo();
-const loadVariantColumns = (db) => db("product_variants").columnInfo();
+const loadProductColumns = async (db) =>
+  (await assertCatalogProductMutationSchema(db)).productColumns;
+const loadVariantColumns = async (db) =>
+  (await assertCatalogProductMutationSchema(db)).variantColumns;
 const findProductById = (db, id) => db("products").where({ id }).first();
 
 const updateProductReturning = (db, { id, patch, returningFields }) =>
@@ -531,7 +537,7 @@ const loadPrimaryVariant = async (db, productId) => {
 };
 
 const replaceProductPhotosTx = async (trx, { id, files }) => {
-  const productColumns = await trx("products").columnInfo();
+  const { productColumns } = await assertCatalogProductMutationSchema(trx);
   const listingPhotoUrls = await replaceProductListingPhotos({
     trx,
     productId: id,

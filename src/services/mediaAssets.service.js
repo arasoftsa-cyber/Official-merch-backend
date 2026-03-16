@@ -1,7 +1,7 @@
 "use strict";
 
 const { randomUUID } = require("crypto");
-const { getTableColumns } = require("../core/db/schemaCache");
+const { assertMediaAssetWriteSchema } = require("../core/db/schemaContract");
 const { normalizeUploadStatus } = require("../storage/uploadStatus");
 
 const buildMediaAssetInsertPayload = async ({
@@ -11,9 +11,18 @@ const buildMediaAssetInsertPayload = async ({
   storageMetadata = {},
 } = {}) => {
   if (!trx) throw new Error("media_asset_transaction_required");
-  const mediaAssetColumns = await getTableColumns(trx, "media_assets");
-  if (!mediaAssetColumns || !Object.prototype.hasOwnProperty.call(mediaAssetColumns, "public_url")) {
-    throw new Error("media_assets_table_not_ready");
+  let mediaAssetColumns;
+  try {
+    mediaAssetColumns = await assertMediaAssetWriteSchema(trx);
+  } catch (error) {
+    if (error?.code === "SCHEMA_CONTRACT_MISSING") {
+      const schemaError = new Error("media_assets_table_not_ready");
+      schemaError.code = error.code;
+      schemaError.statusCode = error.statusCode || 500;
+      schemaError.details = error.details || [];
+      throw schemaError;
+    }
+    throw error;
   }
 
   const payload = {

@@ -1,8 +1,8 @@
 const express = require("express");
 const { getDb } = require("../core/db/db");
 const { requireAuth } = require("../core/http/auth.middleware");
+const { requirePolicy } = require("../core/http/policy.middleware");
 const {
-  ensureAdminAccess,
   putProductVariantsWorkflow,
   putVariantErrorResponse,
   getProductVariantsResponse,
@@ -32,11 +32,15 @@ const {
 const { logLegacyContractUse } = require("../contracts/shared");
 
 const router = express.Router();
+const requireAdminProductVariantsRead = requirePolicy("admin_dashboard:read", "product_variants");
+const requireAdminProductVariantsWrite = requirePolicy("admin_dashboard:write", "product_variants");
+const requireAdminInventorySkusRead = requirePolicy("admin_dashboard:read", "inventory_skus");
+const requireAdminInventorySkusWrite = requirePolicy("admin_dashboard:write", "inventory_skus");
 
 router.get(
   ["/products/:id/variants", "/admin/products/:id/variants"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminProductVariantsRead,
   async (req, res, next) => {
     try {
       const result = await getProductVariantsResponse({ db: getDb(), productId: req.params.id });
@@ -50,7 +54,7 @@ router.get(
 router.put(
   ["/products/:id/variants", "/admin/products/:id/variants"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminProductVariantsWrite,
   express.json(),
   async (req, res, next) => {
     try {
@@ -94,7 +98,7 @@ router.put(
 router.delete(
   ["/product-variants/:variantId", "/admin/product-variants/:variantId"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminProductVariantsWrite,
   async (req, res, next) => {
     try {
       const result = await deleteVariantResponse({ db: getDb(), variantId: req.params.variantId });
@@ -108,7 +112,7 @@ router.delete(
 router.get(
   ["/inventory-skus", "/admin/inventory-skus"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminInventorySkusRead,
   async (req, res, next) => {
     try {
       const result = await listInventorySkusResponse({ db: getDb(), query: req.query });
@@ -122,7 +126,7 @@ router.get(
 router.post(
   ["/inventory-skus", "/admin/inventory-skus"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminInventorySkusWrite,
   express.json(),
   async (req, res, next) => {
     try {
@@ -149,7 +153,7 @@ router.post(
 router.post(
   ["/inventory-skus/bulk-deactivate", "/admin/inventory-skus/bulk-deactivate"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminInventorySkusWrite,
   express.json(),
   async (req, res, next) => {
     try {
@@ -176,7 +180,7 @@ router.post(
 router.patch(
   ["/inventory-skus/:id", "/admin/inventory-skus/:id"],
   requireAuth,
-  ensureAdminAccess,
+  requireAdminInventorySkusWrite,
   express.json(),
   async (req, res, next) => {
     try {

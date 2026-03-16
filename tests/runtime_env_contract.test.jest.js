@@ -18,6 +18,8 @@ describe("runtime env contract", () => {
     expect(resolved.origins.backendBaseUrl).toBe("http://localhost:3000");
     expect(resolved.env.instanceMode).toBe("single");
     expect(resolved.trustBoundary.sharedStateReady).toBe(false);
+    expect(resolved.trustBoundary.coordinationMode).toBe("process-local-memory");
+    expect(resolved.trustBoundary.supportsMultiInstance).toBe(false);
   });
 
   it("fails clearly when multi-instance mode is declared for process-local trust controls", () => {
@@ -36,7 +38,8 @@ describe("runtime env contract", () => {
     expect(resolved.ok).toBe(false);
     expect(resolved.errors).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("INSTANCE_MODE=multi is not supported"),
+        expect.stringContaining("INSTANCE_MODE=multi is blocked"),
+        expect.stringContaining("Set INSTANCE_MODE=single or unset INSTANCE_MODE"),
       ])
     );
   });
@@ -257,6 +260,8 @@ describe("runtime env contract", () => {
         event: "process_local_trust_boundary_controls",
         instanceMode: "single",
         sharedStateReady: false,
+        coordinationMode: "process-local-memory",
+        supportsMultiInstance: false,
       })
     );
     expect(warn).toHaveBeenCalledWith(

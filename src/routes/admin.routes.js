@@ -161,15 +161,7 @@ const sendShipmentDispatchedEmailBestEffort = async ({
   }
 };
 
-const ensureAdmin = (req, res) => {
-  if (req.user?.role !== "admin") {
-    res.status(403).json(FORBIDDEN);
-    return false;
-  }
-  return true;
-};
-
-const LINK_POLICY = requirePolicy("admin:ownership:write", "system");
+const LINK_POLICY = requirePolicy("admin_dashboard:write", "artists");
 
 const sortMappingsDeterministically = (rows = []) =>
   rows
@@ -292,7 +284,6 @@ const reconcileArtistUserMapping = async ({ db, artistId, userId }) => {
 
 const handleLinkArtistUser = async (req, res, next) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const db = getDb();
     const { artistId } = req.params;
     const rawUserId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
@@ -521,7 +512,6 @@ const router = express.Router();
 registerAdminDashboardRoutes(router, {
   requireAuth,
   requirePolicy,
-  ensureAdmin,
   listAdminLeads,
   getDb,
   formatDashboardSummary,
@@ -530,9 +520,9 @@ registerAdminDashboardRoutes(router, {
 registerAdminSeedRoutes(router, {
   REGISTER_TEST_SEED_ROUTES,
   requireAuth,
+  requirePolicy,
   express,
   TEST_SEEDS_ENABLED,
-  ensureAdmin,
   MAX_SEEDED_ORDERS,
   getDb,
   ensureArtistForSeed,
@@ -544,7 +534,6 @@ registerAdminSeedRoutes(router, {
 registerAdminOrderRoutes(router, {
   requireAuth,
   requirePolicy,
-  ensureAdmin,
   getDb,
   formatOrder,
   formatItem,
@@ -559,7 +548,7 @@ registerAdminOrderRoutes(router, {
 
 registerAdminPaymentRoutes(router, {
   requireAuth,
-  ensureAdmin,
+  requirePolicy,
   getDb,
   PAYMENT_NOT_FOUND,
   listFlags,
@@ -573,7 +562,6 @@ router.post(
 );
 
 registerAdminArtistRoutes(router, {
-  ensureAdmin,
 });
 
 module.exports = router;

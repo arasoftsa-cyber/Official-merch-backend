@@ -23,6 +23,7 @@ const mediaAssetsRouter = require("./mediaAssets.routes");
 const homepageRouter = require("./homepage.routes");
 const adminHomepageRouter = require("./homepage.admin.routes");
 const product = require("./productVariants.routes");
+const configRouter = require("./config.routes");
 
 const DASHBOARD_META = Object.freeze({
   artist: ["/api/artist/dashboard", "/api/artist/dashboard/orders"],
@@ -44,6 +45,7 @@ router.get("/partner/admin/leads", requireAuth, requirePolicy("admin_dashboard:r
 });
 
 router.use("/auth", authRoutes);
+router.use("/config", configRouter);
 router.use("/admin/provisioning", onboardingRoutes);
 router.use("/artists", artistRoutes);
 router.use("/artist/dashboard", artistDashboardRoutes);

@@ -296,6 +296,8 @@ const startServer = async () => {
     storageProvider: configuredStorageProvider,
     instanceMode: validatedRuntimeEnv.env.instanceMode,
     trustBoundarySharedStateReady: validatedRuntimeEnv.trustBoundary.sharedStateReady,
+    trustBoundaryCoordinationMode: validatedRuntimeEnv.trustBoundary.coordinationMode,
+    trustBoundarySupportsMultiInstance: validatedRuntimeEnv.trustBoundary.supportsMultiInstance,
     trustBoundaryControls: validatedRuntimeEnv.trustBoundary.controls.map((control) => control.id),
     configWarnings: validatedRuntimeEnv.warnings,
     originReady: originReadiness.ready,

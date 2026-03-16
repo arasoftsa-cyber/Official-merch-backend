@@ -1,3 +1,5 @@
+const { assertCatalogProductMutationSchema } = require("../../core/db/schemaContract");
+
 const registerDropsPublicRoutes = (router, deps) => {
   const {
     setDropIdAliasDeprecationHeaders,
@@ -60,9 +62,7 @@ router.get("/:handle/products", async (req, res, next) => {
       return res.status(404).json(PUBLIC_NOT_FOUND);
     }
     const db = getDb();
-    const productColumns = await db("products").columnInfo();
-    const hasStatus = Object.prototype.hasOwnProperty.call(productColumns, "status");
-    const hasIsActive = Object.prototype.hasOwnProperty.call(productColumns, "is_active");
+    await assertCatalogProductMutationSchema(db);
     const productsQuery = db("drop_products as dp")
       .join("products as p", "dp.product_id", "p.id")
       .select(
@@ -75,8 +75,8 @@ router.get("/:handle/products", async (req, res, next) => {
       .where("dp.drop_id", drop.id);
     applyPublicActiveProductFilter(productsQuery, {
       productRef: "p",
-      hasStatus,
-      hasIsActive,
+      hasStatus: true,
+      hasIsActive: true,
     });
     applySellableVariantExists(productsQuery, { productRef: "p.id" });
     applyDropProductOrdering(productsQuery);

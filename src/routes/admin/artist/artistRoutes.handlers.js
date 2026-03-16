@@ -14,8 +14,8 @@ let updateArtistSubscriptionActionRef = null;
 let reconcileArtistUserMappingRef = null;
 
 const registerAdminArtistRoutes = (router, deps = {}) => {
-  const { ensureAdmin } = deps;
-  const LINK_POLICY = requirePolicy("admin:ownership:write", "system");
+  const requireAdminArtistsRead = requirePolicy("admin_dashboard:read", "artists");
+  const requireAdminArtistsWrite = requirePolicy("admin_dashboard:write", "artists");
 
 const sortMappingsDeterministically = (rows = []) =>
   rows
@@ -138,7 +138,6 @@ const reconcileArtistUserMapping = async ({ db, artistId, userId }) => {
 
 const handleLinkArtistUser = async (req, res, next) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const db = getDb();
     const { artistId } = req.params;
     const rawUserId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
@@ -193,7 +192,7 @@ const handleLinkArtistUser = async (req, res, next) => {
 router.post(
   "/artists/:artistId/link-user",
   requireAuth,
-  LINK_POLICY,
+  requireAdminArtistsWrite,
   express.json(),
   handleLinkArtistUser
 );
@@ -642,26 +641,12 @@ const updateArtistSubscriptionAction = async ({ db, subscriptionId, payload = {}
   };
 };
 
-router.get("/artists", requireAuth, async (req, res) => {
+router.get("/artists", requireAuth, requireAdminArtistsRead, async (req, res) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const db = getDb();
-    const artistColumns = await db("artists").columnInfo();
-    const artistSelects = ["id", "name", "handle", "created_at"];
-    if (Object.prototype.hasOwnProperty.call(artistColumns, "status")) {
-      artistSelects.push("status");
-    }
-    if (Object.prototype.hasOwnProperty.call(artistColumns, "email")) {
-      artistSelects.push("email");
-    }
-    if (Object.prototype.hasOwnProperty.call(artistColumns, "phone")) {
-      artistSelects.push("phone");
-    }
-    if (Object.prototype.hasOwnProperty.call(artistColumns, "is_featured")) {
-      artistSelects.push("is_featured");
-    }
+    await assertAdminArtistDirectorySchema(db);
     const rows = await db("artists")
-      .select(artistSelects)
+      .select("id", "name", "handle", "created_at", "status", "email", "phone", "is_featured")
       .orderBy("created_at", "desc")
       .limit(200);
 
@@ -763,9 +748,12 @@ router.get("/artists", requireAuth, async (req, res) => {
   }
 });
 
-router.get("/artists/:artistId/subscription", requireAuth, async (req, res) => {
+router.get(
+  "/artists/:artistId/subscription",
+  requireAuth,
+  requireAdminArtistsRead,
+  async (req, res) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const artistId = String(req.params.artistId || "").trim();
     if (!artistId) {
       return res.status(400).json({ error: "validation_error", message: "artist id is required" });
@@ -783,9 +771,12 @@ router.get("/artists/:artistId/subscription", requireAuth, async (req, res) => {
   }
 });
 
-router.patch("/artist-subscriptions/:subscriptionId", requireAuth, async (req, res) => {
+router.patch(
+  "/artist-subscriptions/:subscriptionId",
+  requireAuth,
+  requireAdminArtistsWrite,
+  async (req, res) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const subscriptionId = String(req.params.subscriptionId || "").trim();
     if (!subscriptionId) {
       return res
@@ -817,9 +808,8 @@ router.patch("/artist-subscriptions/:subscriptionId", requireAuth, async (req, r
   }
 });
 
-router.get("/artists/:id", requireAuth, async (req, res) => {
+router.get("/artists/:id", requireAuth, requireAdminArtistsRead, async (req, res) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const artistId = String(req.params.id || "").trim();
     if (!artistId) {
       return res.status(400).json({ error: "validation_error", message: "artist id is required" });
@@ -836,9 +826,8 @@ router.get("/artists/:id", requireAuth, async (req, res) => {
   }
 });
 
-router.patch("/artists/:id", requireAuth, async (req, res) => {
+router.patch("/artists/:id", requireAuth, requireAdminArtistsWrite, async (req, res) => {
   try {
-    if (!ensureAdmin(req, res)) return;
     const artistId = String(req.params.id || "").trim();
     if (!artistId) {
       return res.status(400).json({ error: "validation_error", message: "artist id is required" });

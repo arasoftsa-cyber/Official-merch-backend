@@ -4,6 +4,10 @@ const { getDb } = require("../core/db/db");
 const { getStorageProvider } = require("../storage");
 const { finalizeUploadedMedia } = require("../storage/mediaUploadLifecycle");
 const { createMediaAsset } = require("./mediaAssets.service");
+const {
+  assertArtistAccessRequestSubmissionSchema,
+  assertArtistAccessRequestMediaSchema,
+} = require("../core/db/schemaContract");
 const { toAbsolutePublicUrl } = require("../utils/publicUrl");
 const { PLAN_TYPES, assertPlanAllowed } = require("../common/constants");
 
@@ -19,6 +23,7 @@ const PROFILE_PHOTO_MAGIC_NUMBERS = {
   "image/webp": [0x52, 0x49, 0x46, 0x46],
 };
 const storageProvider = getStorageProvider();
+const ARTIST_ACCESS_REQUEST_DEBUG_ENABLED = process.env.DEBUG_ARTIST_ACCESS_REQUESTS === "1";
 
 const LIMITS = {
   artistName: 120,
@@ -34,6 +39,17 @@ const LIMITS = {
 
 const trim = (value) => (typeof value === "string" ? value.trim() : "");
 
+const logArtistAccessRequestDebug = (event, metadata = {}) => {
+  if (!ARTIST_ACCESS_REQUEST_DEBUG_ENABLED) return;
+  console.info(
+    JSON.stringify({
+      scope: "artist_access_request",
+      event,
+      ...metadata,
+    })
+  );
+};
+
 const addDetail = (details, field, message) => details.push({ field, message });
 
 const validationError = (details) => {
@@ -46,6 +62,13 @@ const validationError = (details) => {
 const normalizePhoneDigits = (value) => trim(value).replace(/\D+/g, "");
 const normalizeHandle = (value) => trim(value).replace(/^@+/, "").toLowerCase();
 const normalizeEmail = (value) => trim(value).toLowerCase();
+const normalizeTrustedContext = (value) => {
+  const requestorUserId = trim(value?.requestorUserId);
+  if (!requestorUserId) return null;
+  return {
+    requestorUserId: requestorUserId || null,
+  };
+};
 
 const normalizeSocials = (input) => {
   if (!input) return [];
@@ -172,8 +195,6 @@ const validatePayload = (payload) => {
   return details;
 };
 
-const hasTable = async (db, tableName) => db.schema.hasTable(tableName);
-
 const existsInArtistAccessRequests = async (db, field, value) => {
   if (field === "phone") {
     const hit = await db("artist_access_requests")
@@ -188,9 +209,6 @@ const existsInArtistAccessRequests = async (db, field, value) => {
 };
 
 const existsInArtistsByHandle = async (db, handle) => {
-  if (!(await hasTable(db, "artists"))) return false;
-  const artistsInfo = await db("artists").columnInfo();
-  if (!Object.prototype.hasOwnProperty.call(artistsInfo, "handle")) return false;
   const hit = await db("artists")
     .whereRaw("lower(trim(handle)) = lower(trim(?))", [handle])
     .first("id");
@@ -198,9 +216,6 @@ const existsInArtistsByHandle = async (db, handle) => {
 };
 
 const existsInUsersByEmail = async (db, email) => {
-  if (!(await hasTable(db, "users"))) return false;
-  const usersInfo = await db("users").columnInfo();
-  if (!Object.prototype.hasOwnProperty.call(usersInfo, "email")) return false;
   const hit = await db("users")
     .whereRaw("lower(trim(email)) = lower(trim(?))", [email])
     .first("id");
@@ -259,13 +274,10 @@ const saveUploadedFile = async (file) => {
   return storageResult.publicUrl;
 };
 
-const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
+const submitArtistAccessRequest = async ({ rawBody = {}, file = null, trustedContext = null }) => {
   const payload = normalizePayload(rawBody);
-  if (process.env.NODE_ENV !== "production" || process.env.DEBUG_ARTIST_ACCESS_REQUESTS === "1") {
-    console.log("[artist-access-request] socials type before normalize:", typeof payload.socials);
-  }
   const socialsArr = normalizeSocials(payload.socials);
-  console.log("[artist-access-request] socials final:", JSON.stringify(socialsArr));
+  const trusted = normalizeTrustedContext(trustedContext);
 
   const details = validatePayload(payload);
   if (details.length > 0) {
@@ -304,15 +316,17 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
   }
 
   const db = getDb();
+  const submissionSchema = await assertArtistAccessRequestSubmissionSchema(db);
   const preConflictField = await findConflictField(db, payload);
   if (preConflictField) {
     throw conflictError(preConflictField);
   }
 
   const requestId = randomUUID();
+  const mediaSchema = file ? await assertArtistAccessRequestMediaSchema(db) : null;
   try {
     const [createdRow] = await db.transaction(async (trx) => {
-      const tableInfo = await trx("artist_access_requests").columnInfo();
+      const requestColumns = submissionSchema.requestColumns;
       const insertPayload = {
         id: requestId,
         artist_name: payload.artist_name,
@@ -322,34 +336,40 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
         socials: trx.raw("?::jsonb", [JSON.stringify(socialsArr)]),
       };
 
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "about_me")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "about_me")) {
         insertPayload.about_me = payload.about || null;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "message_for_fans")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "message_for_fans")) {
         insertPayload.message_for_fans = payload.message_for_fans || null;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "about")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "about")) {
         insertPayload.about = payload.about || null;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "contact_email")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "contact_email")) {
         insertPayload.contact_email = payload.email;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "contact_phone")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "contact_phone")) {
         insertPayload.contact_phone = payload.phone;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "pitch")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "pitch")) {
         insertPayload.pitch = payload.about || null;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "status")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "status")) {
         insertPayload.status = "pending";
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "requested_plan_type")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "requested_plan_type")) {
         insertPayload.requested_plan_type = requestedPlanType;
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "created_at")) {
+      if (
+        trusted?.requestorUserId &&
+        Object.prototype.hasOwnProperty.call(requestColumns, "requestor_user_id")
+      ) {
+        insertPayload.requestor_user_id = trusted.requestorUserId;
+      }
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "created_at")) {
         insertPayload.created_at = trx.fn.now();
       }
-      if (Object.prototype.hasOwnProperty.call(tableInfo, "updated_at")) {
+      if (Object.prototype.hasOwnProperty.call(requestColumns, "updated_at")) {
         insertPayload.updated_at = trx.fn.now();
       }
 
@@ -368,21 +388,28 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
             id: mediaAssetId,
             publicUrl,
           });
-          await trx("entity_media_links").insert({
-            id: randomUUID(),
+          const linkInsert = {
             media_asset_id: mediaAssetId,
             entity_type: "artist_access_request",
             entity_id: requestId,
             role: "profile_photo",
             sort_order: 0,
-            created_at: trx.fn.now(),
-          });
+          };
+          if (Object.prototype.hasOwnProperty.call(mediaSchema.entityMediaLinkColumns, "id")) {
+            linkInsert.id = randomUUID();
+          }
+          if (
+            Object.prototype.hasOwnProperty.call(mediaSchema.entityMediaLinkColumns, "created_at")
+          ) {
+            linkInsert.created_at = trx.fn.now();
+          }
+          await trx("entity_media_links").insert(linkInsert);
 
           const requestUpdates = {};
-          if (Object.prototype.hasOwnProperty.call(tableInfo, "profile_photo_path")) {
+          if (Object.prototype.hasOwnProperty.call(requestColumns, "profile_photo_path")) {
             requestUpdates.profile_photo_path = publicUrl;
           }
-          if (Object.prototype.hasOwnProperty.call(tableInfo, "profile_photo_url")) {
+          if (Object.prototype.hasOwnProperty.call(requestColumns, "profile_photo_url")) {
             requestUpdates.profile_photo_url = publicUrl;
           }
           if (Object.keys(requestUpdates).length > 0) {
@@ -394,11 +421,20 @@ const submitArtistAccessRequest = async ({ rawBody = {}, file = null }) => {
       return [inserted];
     });
 
+    logArtistAccessRequestDebug("submitted", {
+      requestId,
+      hasProfilePhoto: Boolean(file),
+    });
+
     return {
       request_id: requestId,
       created_at: createdRow?.created_at || new Date().toISOString(),
     };
   } catch (error) {
+    logArtistAccessRequestDebug("submit_failed", {
+      requestId,
+      code: error?.code || "unknown",
+    });
     if (error?.code === "23505") {
       const field = mapUniqueViolationToField(error) || (await findConflictField(db, payload)) || "email";
       throw conflictError(field);
@@ -429,6 +465,7 @@ const checkArtistAccessAvailability = async ({ field, value }) => {
 const copyRequestProfilePhotoToArtist = async ({ db, trx, requestId, artistId }) => {
   const q = trx || db;
   if (!q || !requestId || !artistId) return { linked: false, reason: "invalid_input" };
+  const mediaSchema = await assertArtistAccessRequestMediaSchema(q);
 
   const reqLink = await q("entity_media_links")
     .select("media_asset_id")
@@ -450,7 +487,7 @@ const copyRequestProfilePhotoToArtist = async ({ db, trx, requestId, artistId })
     .first();
   if (existing?.id) return { linked: false, reason: "already_linked" };
 
-  const linkColumns = await q("entity_media_links").columnInfo();
+  const linkColumns = mediaSchema.entityMediaLinkColumns;
   const insertPayload = {
     media_asset_id: reqLink.media_asset_id,
     entity_type: "artist",

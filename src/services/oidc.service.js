@@ -31,6 +31,8 @@ const OIDC_STATE_VERSION = 1;
 let oidcClientPromise = null;
 let oidcConfigCache = null;
 let frontendOidcConfigCache = null;
+// Process-local only. Startup runtime validation blocks INSTANCE_MODE=multi until
+// these exchange-code stores are backed by a shared coordination layer.
 const exchangeCodeStore = new Map();
 const consumedExchangeCodeStore = new Map();
 const OIDC_EXCHANGE_CODE_CONTROL = getProcessLocalTrustBoundaryControl("oidc_exchange_codes");

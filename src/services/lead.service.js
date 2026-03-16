@@ -1,21 +1,6 @@
 const { randomUUID } = require("crypto");
 const { getDb } = require("../core/db/db");
-
-const ADMIN_LEAD_COLUMNS = [
-  "id",
-  "source",
-  "drop_handle",
-  "artist_handle",
-  "name",
-  "phone",
-  "email",
-  "answers_json",
-  "status",
-  "pipeline_stage",
-  "notes",
-  "created_at",
-  "updated_at",
-];
+const { assertAdminLeadReadSchema } = require("../core/db/schemaContract");
 
 const createLead = async ({
   source,
@@ -46,24 +31,23 @@ const createLead = async ({
 
 const listAdminLeads = async () => {
   const db = getDb();
-  const hasLeadsTable = await db.schema.hasTable("leads");
-  if (!hasLeadsTable) return [];
-
-  const leadColumnInfo = await db("leads").columnInfo();
-  const hasColumn = (name) => Object.prototype.hasOwnProperty.call(leadColumnInfo, name);
-  const selectColumns = ADMIN_LEAD_COLUMNS.filter((column) => hasColumn(column));
-  const orderColumn = hasColumn("created_at") ? "created_at" : hasColumn("id") ? "id" : null;
-
-  const query = db("leads");
-  if (selectColumns.length > 0) {
-    query.select(selectColumns);
-  } else {
-    query.select("*");
-  }
-  if (orderColumn) {
-    query.orderBy(orderColumn, "desc");
-  }
-  return query;
+  await assertAdminLeadReadSchema(db);
+  return db("leads")
+    .select(
+      "id",
+      "source",
+      "drop_handle",
+      "artist_handle",
+      "name",
+      "phone",
+      "email",
+      "answers_json",
+      "status",
+      "admin_note",
+      "created_at",
+      "updated_at"
+    )
+    .orderBy("created_at", "desc");
 };
 
 module.exports = { createLead, listAdminLeads };

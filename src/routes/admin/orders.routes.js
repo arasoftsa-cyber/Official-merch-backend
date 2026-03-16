@@ -2,7 +2,6 @@ const registerAdminOrderRoutes = (router, deps) => {
   const {
     requireAuth,
     requirePolicy,
-    ensureAdmin,
     getDb,
     formatOrder,
     formatItem,
@@ -15,13 +14,15 @@ const registerAdminOrderRoutes = (router, deps) => {
     sendOrderStatusUpdateEmailBestEffort,
   } = deps;
 
+  const requireAdminOrdersRead = requirePolicy("admin_dashboard:read", "orders");
+  const requireAdminOrdersWrite = requirePolicy("admin_dashboard:write", "orders");
+
   router.get(
     "/dashboard/orders",
     requireAuth,
-    requirePolicy("admin_dashboard:read", "self"),
+    requireAdminOrdersRead,
     async (req, res, next) => {
       try {
-        if (!ensureAdmin(req, res)) return;
         const db = getDb();
         const rows = await db("orders")
           .leftJoin("order_items", "order_items.order_id", "orders.id")
@@ -61,9 +62,8 @@ const registerAdminOrderRoutes = (router, deps) => {
     }
   );
 
-  router.get("/orders", requireAuth, async (req, res, next) => {
+  router.get("/orders", requireAuth, requireAdminOrdersRead, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const hasLimitOffset =
         typeof req.query.limit !== "undefined" ||
@@ -154,9 +154,8 @@ const registerAdminOrderRoutes = (router, deps) => {
     }
   });
 
-  router.get("/orders/:id", requireAuth, async (req, res, next) => {
+  router.get("/orders/:id", requireAuth, requireAdminOrdersRead, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const order = await db("orders").where({ id: req.params.id }).first();
       if (!order) {
@@ -183,9 +182,8 @@ const registerAdminOrderRoutes = (router, deps) => {
     }
   });
 
-  router.get("/orders/:id/events", requireAuth, async (req, res, next) => {
+  router.get("/orders/:id/events", requireAuth, requireAdminOrdersRead, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const order = await db("orders").where({ id: req.params.id }).first();
       if (!order) {
@@ -202,9 +200,8 @@ const registerAdminOrderRoutes = (router, deps) => {
     }
   });
 
-  router.post("/orders/:id/fulfill", requireAuth, async (req, res, next) => {
+  router.post("/orders/:id/fulfill", requireAuth, requireAdminOrdersWrite, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const orderId = req.params.id;
       const order = await db("orders").where({ id: orderId }).first();
@@ -260,9 +257,8 @@ const registerAdminOrderRoutes = (router, deps) => {
     }
   });
 
-  router.post("/orders/:id/refund", requireAuth, async (req, res, next) => {
+  router.post("/orders/:id/refund", requireAuth, requireAdminOrdersWrite, async (req, res, next) => {
     try {
-      if (!ensureAdmin(req, res)) return;
       const db = getDb();
       const orderId = req.params.id;
       const order = await db("orders").where({ id: orderId }).first();
