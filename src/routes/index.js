@@ -24,6 +24,12 @@ const homepageRouter = require("./homepage.routes");
 const adminHomepageRouter = require("./homepage.admin.routes");
 const product = require("./productVariants.routes");
 const configRouter = require("./config.routes");
+const testSupportRouter = require("./testSupport.routes");
+
+const NODE_ENV = String(process.env.NODE_ENV || "").trim().toLowerCase();
+const REGISTER_TEST_SUPPORT_ROUTES =
+  NODE_ENV === "test" ||
+  String(process.env.ENABLE_PLAYWRIGHT_TEST_SUPPORT || "").trim().toLowerCase() === "true";
 
 const DASHBOARD_META = Object.freeze({
   artist: ["/api/artist/dashboard", "/api/artist/dashboard/orders"],
@@ -46,6 +52,9 @@ router.get("/partner/admin/leads", requireAuth, requirePolicy("admin_dashboard:r
 
 router.use("/auth", authRoutes);
 router.use("/config", configRouter);
+if (REGISTER_TEST_SUPPORT_ROUTES) {
+  router.use("/test-support", testSupportRouter);
+}
 router.use("/admin/provisioning", onboardingRoutes);
 router.use("/artists", artistRoutes);
 router.use("/artist/dashboard", artistDashboardRoutes);
