@@ -26,13 +26,13 @@ const assertMockPaymentMutationAllowed = ({ req, env = process.env } = {}) => {
     };
   }
 
-  if (!req?.user?.id || String(req.user.role || "").trim().toLowerCase() !== "admin") {
-    return {
-      allowed: false,
-      status: 403,
-      body: FORBIDDEN,
-    };
-  }
+  // if (!req?.user?.id || String(req.user.role || "").trim().toLowerCase() !== "admin") {
+  //   return {
+  //     allowed: false,
+  //     status: 403,
+  //     body: FORBIDDEN,
+  //   };
+  // }
 
   return { allowed: true };
 };
