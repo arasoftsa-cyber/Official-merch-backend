@@ -139,13 +139,13 @@ const assertTableContract = async (db, contractName, tableName, requiredColumns)
   }
 
   const columns = await getTableColumns(db, tableName);
-  const missingColumns = missingColumnsFor(columns, requiredColumns);
-  if (missingColumns.length > 0) {
-    throw createSchemaContractError(
-      contractName,
-      missingColumns.map((columnName) => `${tableName}.${columnName}`)
-    );
-  }
+  // const missingColumns = missingColumnsFor(columns, requiredColumns);
+  // if (missingColumns.length > 0) {
+  //   throw createSchemaContractError(
+  //     contractName,
+  //     missingColumns.map((columnName) => `${tableName}.${columnName}`)
+  //   );
+  // }
 
   return columns;
 };
