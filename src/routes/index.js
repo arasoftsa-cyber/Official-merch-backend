@@ -24,6 +24,8 @@ const homepageRouter = require("./homepage.routes");
 const adminHomepageRouter = require("./homepage.admin.routes");
 const product = require("./productVariants.routes");
 
+app.use(express.json({ limit: "10mb" }));
+
 const DASHBOARD_META = Object.freeze({
   artist: ["/api/artist/dashboard", "/api/artist/dashboard/orders"],
   label: ["/api/labels/dashboard", "/api/labels/dashboard/orders"],

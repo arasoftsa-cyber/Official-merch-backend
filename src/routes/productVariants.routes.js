@@ -51,7 +51,7 @@ router.put(
   ["/products/:id/variants", "/admin/products/:id/variants"],
   requireAuth,
   ensureAdminAccess,
-  express.json(),
+  // express.json(),
   async (req, res, next) => {
     try {
       const normalized = normalizePutProductVariantsPayload(req.body || {});
@@ -123,7 +123,7 @@ router.post(
   ["/inventory-skus", "/admin/inventory-skus"],
   requireAuth,
   ensureAdminAccess,
-  express.json(),
+  // express.json({limit: "10mb"}),
   async (req, res, next) => {
     try {
       const normalized = normalizeInventorySkuCreatePayload(req.body || {});
@@ -150,7 +150,7 @@ router.post(
   ["/inventory-skus/bulk-deactivate", "/admin/inventory-skus/bulk-deactivate"],
   requireAuth,
   ensureAdminAccess,
-  express.json(),
+  // express.json(),
   async (req, res, next) => {
     try {
       const normalized = normalizeBulkDeactivateInventorySkusPayload(req.body || {});
@@ -177,7 +177,7 @@ router.patch(
   ["/inventory-skus/:id", "/admin/inventory-skus/:id"],
   requireAuth,
   ensureAdminAccess,
-  express.json(),
+  // express.json(),
   async (req, res, next) => {
     try {
       const skuId = asUuidOrNull(req.params.id);
