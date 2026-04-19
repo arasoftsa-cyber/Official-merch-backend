@@ -8,6 +8,7 @@ const {
 const { getDb } = require("../../../core/db/db");
 const {
   PRODUCT_STATUS_INACTIVE,
+  PRODUCT_STATUS_REJECTED,
   normalizeProductStatusValue,
   statusFromIsActive,
   normalizeProductStatusFromRecord,

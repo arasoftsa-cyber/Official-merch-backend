@@ -44,7 +44,7 @@ const enableLegacyUploadsStatic = isTruthyEnv(process.env.ENABLE_LEGACY_UPLOADS_
 const shouldServeUploadsFromApp =
   configuredStorageProvider !== STORAGE_PROVIDER_OBJECT || enableLegacyUploadsStatic;
 const corsOptions = {
-  origin: frontendOrigin,
+  origin: '*',
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
