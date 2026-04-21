@@ -1,3 +1,6 @@
+const paymentController = require("../../controllers/payment.controller");
+const { route } = require("../payments.routes");
+
 const registerOrderLifecycleRoutes = (router, deps) => {
   const {
     requireAuth,
@@ -136,71 +139,76 @@ router.post("/:id/cancel", requireAuth, async (req, res, next) => {
   }
 });
 
-router.post("/:id/pay", requireAuth, express.json(), paymentLimiter, async (req, res, next) => {
-  try {
-    if (!rejectIfNotBuyer(req, res)) return;
-    let currency;
-    try {
-      const normalized = normalizeOrderPaymentPayload(req.body || {});
-      currency = assertSupportedCurrency(normalized.dto.currency, {
-        allowDefaultOnEmpty: true,
-      });
-    } catch (currencyErr) {
-      if (currencyErr?.code === "CURRENCY_MISMATCH") {
-        return fail(
-          res,
-          400,
-          CURRENCY_MISMATCH,
-          "Currency does not match the configured system currency.",
-          currencyErr.details
-        );
-      }
-      throw currencyErr;
-    }
-    if (!req.body?.currency) {
-      console.info("[orders.currency]", {
-        event: "currency_autoinjected",
-        currency: currency || getSystemCurrency(),
-      });
-    }
-    const result = await startPaymentForOrder({
-      knex: getDb(),
-      orderId: req.params.id,
-      buyerUserId: req.user.id,
-      currency,
-    });
-    const paymentId = result.paymentId;
-    const confirmPath = paymentId
-      ? `/api/payments/mock/confirm/${paymentId}`
-      : null;
-    return ok(res, {
-      ok: true,
-      paymentId,
-      status: result.status,
-      attemptId: paymentId,
-      confirmPath,
-      mock: confirmPath ? { confirmPath } : null,
-    });
-  } catch (error) {
-    if (error.code === "ORDER_NOT_FOUND") {
-      return fail(res, 404, ORDER_NOT_FOUND, "Order not found");
-    }
-    if (error.code === "ORDER_NOT_PAYABLE") {
-      return fail(res, 400, ORDER_NOT_PAYABLE, "Order is not payable");
-    }
-    if (error.code === "CURRENCY_MISMATCH") {
-      return fail(
-        res,
-        400,
-        CURRENCY_MISMATCH,
-        "Currency does not match the configured system currency.",
-        error.details
-      );
-    }
-    next(error);
-  }
-});
+// router.post("/:id/pay", requireAuth, paymentLimiter, async (req, res, next) => {
+//   try {
+//     if (!rejectIfNotBuyer(req, res)) return;
+//     let currency;
+//     try {
+//       const normalized = normalizeOrderPaymentPayload(req.body || {});
+//       currency = assertSupportedCurrency(normalized.dto.currency, {
+//         allowDefaultOnEmpty: true,
+//       });
+//     } catch (currencyErr) {
+//       if (currencyErr?.code === "CURRENCY_MISMATCH") {
+//         return fail(
+//           res,
+//           400,
+//           CURRENCY_MISMATCH,
+//           "Currency does not match the configured system currency.",
+//           currencyErr.details
+//         );
+//       }
+//       throw currencyErr;
+//     }
+//     if (!req.body?.currency) {
+//       console.info("[orders.currency]", {
+//         event: "currency_autoinjected",
+//         currency: currency || getSystemCurrency(),
+//       });
+//     }
+//     const result = await startPaymentForOrder({
+//       knex: getDb(),
+//       orderId: req.params.id,
+//       buyerUserId: req.user.id,
+//       currency,
+//     });
+//     const paymentId = result.paymentId;
+//     const confirmPath = paymentId
+//       ? `/api/payments/mock/confirm/${paymentId}`
+//       : null;
+//     return ok(res, {
+//       ok: true,
+//       paymentId,
+//       status: result.status,
+//       attemptId: paymentId,
+//       confirmPath,
+//       mock: confirmPath ? { confirmPath } : null,
+//     });
+//   } catch (error) {
+//     if (error.code === "ORDER_NOT_FOUND") {
+//       return fail(res, 404, ORDER_NOT_FOUND, "Order not found");
+//     }
+//     if (error.code === "ORDER_NOT_PAYABLE") {
+//       return fail(res, 400, ORDER_NOT_PAYABLE, "Order is not payable");
+//     }
+//     if (error.code === "CURRENCY_MISMATCH") {
+//       return fail(
+//         res,
+//         400,
+//         CURRENCY_MISMATCH,
+//         "Currency does not match the configured system currency.",
+//         error.details
+//       );
+//     }
+//     next(error);
+//   }
+// });
 
-};
+router.post("/:id/pay", requireAuth, paymentLimiter, paymentController.createPayment);
+
+router.post("/paid", paymentController.changePaymentStatusToPaid);
+
+}
+
 
 module.exports = { registerOrderLifecycleRoutes };
