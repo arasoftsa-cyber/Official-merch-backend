@@ -59,6 +59,7 @@ router.post(
             legacyKeys: normalized.meta.legacyKeys,
           });
           payload = validateCreateOrderPayload(normalized.dto);
+          payload.addressId = normalized.dto.addressId || normalized.dto.addressId;
           payload.currency = assertSupportedCurrency(payload.currency, {
             allowDefaultOnEmpty: true,
           });
@@ -96,6 +97,18 @@ router.post(
 
         const db = getDb();
         await assertOrderItemSnapshotSchema(db);
+
+        // get address from payload by id
+        let deliveryAddress = null;
+        if (payload.addressId) {
+          const address = await db("user_addresses")
+            .where({ id: payload.addressId, user_id: req.user.id })
+            .first();
+          if (address) {
+            deliveryAddress = address;
+          }
+        }
+
         const order = await db.transaction(async (trx) => {
           const now = trx.fn.now();
           let totalCents = 0;
@@ -112,6 +125,7 @@ router.post(
             buyer_user_id: req.user.id,
             status: "placed",
             total_cents: totalCents,
+            delivery_address: deliveryAddress || null,
             created_at: now,
             updated_at: now,
           });

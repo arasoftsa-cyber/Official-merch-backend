@@ -234,6 +234,7 @@ const formatOrder = (row) => {
     status: row.status,
     totalCents: row.total_cents,
     currency: getSystemCurrency(),
+    deliveryAddress: row.delivery_address || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

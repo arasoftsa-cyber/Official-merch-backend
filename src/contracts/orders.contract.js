@@ -5,6 +5,19 @@ const { createContractError, resolveAliasedField } = require("./shared");
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+const deliveryAddressSchema = z.object({
+  fullName: z.string().trim().min(1, "fullName is required"),
+  phone: z.string().trim().min(1, "phone is required"),
+  line1: z.string().trim().min(1, "line1 is required"),
+  line2: z.string().trim().optional(),
+  landmark: z.string().trim().optional(),
+  city: z.string().trim().min(1, "city is required"),
+  state: z.string().trim().min(1, "state is required"),
+  postalCode: z.string().trim().min(1, "postalCode is required"),
+  country: z.string().trim().min(1, "country is required").default("India"),
+  addressType: z.string().trim().default("home").optional(),
+});
+
 const orderLineSchema = z.object({
   productId: z.string().trim().regex(UUID_RE, "productId must be a valid UUID"),
   productVariantId: z.string().trim().regex(UUID_RE, "productVariantId must be a valid UUID"),
@@ -21,6 +34,7 @@ const createOrderSchema = z.object({
     .min(1, "items must contain at least one item")
     .max(50, "items cannot exceed 50 items"),
   currency: z.string().trim().min(1, "currency is required").optional(),
+  deliveryAddress: deliveryAddressSchema.optional(),
 });
 
 const normalizeLine = (input = {}) => {
@@ -61,6 +75,24 @@ const normalizeCreateOrderPayload = (input = {}) => {
     canonicalKey: "currency",
     normalize: (value) => String(value || "").trim().toUpperCase(),
   });
+
+  const normalizeAddressField = (obj) => {
+    if (!obj || typeof obj !== "object") return null;
+    return {
+      fullName: String(obj.fullName || obj.full_name || "").trim(),
+      phone: String(obj.phone || "").trim(),
+      line1: String(obj.line1 || "").trim(),
+      line2: String(obj.line2 || "").trim() || undefined,
+      landmark: String(obj.landmark || "").trim() || undefined,
+      city: String(obj.city || "").trim(),
+      state: String(obj.state || "").trim(),
+      postalCode: String(obj.postalCode || obj.postal_code || "").trim(),
+      country: String(obj.country || "India").trim(),
+      addressType: String(obj.addressType || obj.address_type || "home").trim(),
+    };
+  };
+
+  const deliveryAddress = body.addressId || body.addressId;
 
   let items = [];
   const legacyKeys = [...currencyField.legacyKeys];
@@ -105,6 +137,7 @@ const normalizeCreateOrderPayload = (input = {}) => {
     dto: {
       items,
       currency: currencyField.value,
+      addressId: deliveryAddress,
     },
     meta: {
       legacyKeys: hasLegacySingleShape
