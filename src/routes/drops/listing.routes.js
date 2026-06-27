@@ -114,6 +114,7 @@ router.get("/", async (req, res, next) => {
           "drops.ends_at",
           "drops.artist_id",
           "drops.label_id",
+          "drops.quiz_json",
           "drops.status",
           "drops.created_by_user_id",
           "drops.created_at",
